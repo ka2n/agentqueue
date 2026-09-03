@@ -65,6 +65,18 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		err = cmdTake(args[1:], stdout)
 	case "ack":
 		err = cmdAck(args[1:], stdout)
+	case "hook":
+		code, err = cmdHook(args[1:], stdin, stdout, stderr)
+	case "register":
+		err = cmdRegister(args[1:], stdin, stdout)
+	case "unregister":
+		err = cmdUnregister(args[1:], stdin, stdout)
+	case "targets":
+		err = cmdTargets(args[1:], stdout)
+	case "install":
+		err = cmdInstall(args[1:], stdin, stdout, stderr)
+	case "uninstall":
+		err = cmdUninstall(args[1:], stdin, stdout)
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand %q\n\n", args[0])
 		usage(stderr)
@@ -75,6 +87,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return exitUsage
 		}
 		fmt.Fprintf(stderr, "agentqueue: %v\n", err)
+		if code == exitUsage {
+			// The subcommand already classified this as a usage problem.
+			return exitUsage
+		}
 		return exitError
 	}
 	return code
@@ -106,6 +122,21 @@ Commands:
   ack    Mark a message done once you have acted on it.
            agentqueue ack --to codex:1f0a-thread 1756800000000-0a1b2c3d4e5f
 
+Setup and session commands:
+  install     Detect the agents you have and set up their integration. For
+              claude that means hook entries in a settings file; codex needs
+              none. Confirms before writing; --dry-run and --print show the
+              exact JSON block instead.
+                agentqueue install --agent claude --scope user
+  uninstall   Remove the hooks install added, and only those.
+  hook claude Serve a Claude Code hook: read the payload on stdin, claim what
+              is pending and inject it into the session. Installed by
+              "install"; you do not run this by hand.
+  register    Record where this session can be reached, so a producer can
+              address it by session id or by working directory.
+  unregister  Drop that record.
+  targets     List the mailboxes under the queue root and what they hold.
+
 Common flags:
   --to <agent>:<name>   target session (required)
   --root <dir>          queue root directory
@@ -120,10 +151,14 @@ Exit codes:
   2  a usage problem
   3  wait timed out with no message (not an error)
 
-Delivery depends on the agent. A claude session pulls: it runs
-"agentqueue wait" in the background and resumes when a message arrives. A codex
-session is pushed an arrival notice on enqueue; the notice carries no message
-body, only the id and the command that fetches it.
+Delivery depends on the agent. A claude session is delivered to by hooks: with
+"agentqueue install", a queued message is injected at the next session
+boundary - session start, the next prompt, or the end of a turn - and the item
+is claimed as it is delivered, so no message arrives twice. A claude session
+can also pull, by running "agentqueue wait" as a background command and
+resuming when it exits; that needs no hooks. A codex session is pushed an
+arrival notice on enqueue; the notice carries no message body, only the id and
+the command that fetches it.
 `)
 }
 

@@ -1,6 +1,7 @@
 # agentqueue
 
-A dependency-free, filesystem-backed message queue for AI coding-agent sessions.
+A filesystem-backed message queue for AI coding-agent sessions. Pure Go, no
+CGO: it cross-compiles anywhere and `go install` needs no toolchain beyond Go.
 
 ## The problem
 
@@ -21,8 +22,8 @@ running session:
 
 | Agent | Model | How it works |
 | --- | --- | --- |
-| `claude` | pull | The session blocks on `agentqueue wait` as a background command; its exit resumes the turn. |
-| `codex` | push | `codex queue --thread <name> --message <notice>` injects an arrival notice into the running thread. |
+| `claude` | push, at the next boundary | Hooks installed by `agentqueue install` claim what is pending and inject it at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
+| `codex` | push | `codex queue --thread <name> --message <notice>` injects an arrival notice into the running thread. No setup needed. |
 | `pi` | planned | A pi extension watches the queue directory and injects the notice in-process. Not shipped in this release. |
 | anything else | — | Write a `Transport` (see below). |
 
@@ -52,26 +53,120 @@ go get github.com/ka2n/agentqueue                            # library
 go install github.com/ka2n/agentqueue/cmd/agentqueue@latest  # CLI
 ```
 
-## Claude Code (pull delivery)
-
-Claude Code sessions cannot be pushed to, but they can run a background bash
-command and get woken when it exits. So the session waits, and the wait *is* the
-delivery.
-
-The producer, from anywhere:
+Then set up the agents you have:
 
 ```sh
-agentqueue push --to claude:reviewer "PR 42 is green, please review it"
+agentqueue install
 ```
 
-The Claude Code session, as a **background** bash command:
+It prints what it found - which agents are on your `$PATH`, how a message
+reaches each one, and what is left to configure - and asks which to set up.
+Claude Code needs hooks; Codex needs nothing.
+
+## Claude Code (hook delivery)
+
+Claude Code cannot be pushed to from outside, but it runs **hooks**, and a hook
+can return text that reaches the model's context. That is the supported
+delivery path, and `agentqueue install` sets it up:
+
+```sh
+agentqueue install --agent claude --scope user
+```
+
+It prints the exact JSON block it will add and asks before writing (`--yes` to
+skip, `--dry-run` to see it and stop, `--print` to paste it in yourself), backs
+the settings file up to `<file>.agentqueue.bak`, and is idempotent: re-running
+it is a no-op. `agentqueue uninstall` removes only the entries it added.
+
+Then, from anywhere:
+
+```sh
+agentqueue push --to claude:<session-id> "PR 42 is green, please review it"
+```
+
+### The three delivery points
+
+Each one fills a hole the others cannot:
+
+| Hook | Fires | What it covers |
+| --- | --- | --- |
+| `SessionStart` | a session starts, resumes, is cleared or forked | Drains everything queued while no session was running. Skipped on `source: "compact"`, where the context is being rebuilt rather than a turn beginning. |
+| `UserPromptSubmit` | the user submits a prompt | Catches what arrived while the session sat idle, delivered alongside the prompt. |
+| `Stop` | the turn is about to end | The only point that can act with no user present: when something was delivered it also returns `decision: "block"` with a reason, so the turn continues and the agent works on the message. |
+
+`SessionEnd` gets a hook too, but only to drop the address record: `SessionEnd`
+has no decision control, and nothing it prints reaches the model.
+
+**Why all three can be installed at once:** delivery *claims* the item. The
+hook runs `TakeNext` in a loop, which renames the file out of `pending/`, so
+whichever hook fires first is the only one that sees it. No message is
+delivered twice.
+
+The loop guard is Claude Code's own `stop_hook_active` flag. When a `Stop` hook
+has already blocked the current turn, the next `Stop` delivery injects context
+but does not block again. `--no-block` disables blocking entirely.
+
+The hook command is `agentqueue hook claude`. You do not run it by hand: it
+reads the hook payload on stdin and prints, only when it claimed something:
+
+```json
+{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"..."},"decision":"block","reason":"1 queued message(s) arrived for claude:abc123; act on them before finishing."}
+```
+
+With nothing pending it prints nothing at all. It is built to never disrupt a
+session: any internal error is logged (`--log <file>`) and it still exits 0
+with empty stdout. `--max` caps how many messages one invocation delivers
+(default 5), since every delivered byte is spent from the session's context
+window.
+
+The injected text names each message's id, creation time, metadata and body,
+says plainly that these came from an external producer rather than from the
+user, and tells the agent the items are already claimed and how to acknowledge
+one:
+
+```sh
+agentqueue ack --to claude:<session-id> <id>
+```
+
+### Addressing a session
+
+A session id is not something a producer knows in advance, so a session records
+itself. The `SessionStart` hook runs `agentqueue register`, which writes
+`<root>/claude/<session-id>/addr.json` (mode 0600) with the session's cwd, pid
+and a timestamp, and indexes it under `<root>/claude/_by_cwd/<cwd>/`, so a
+producer can resolve "the session working in this directory". `SessionEnd` runs
+`agentqueue unregister`, which removes both. `agentqueue targets` lists what is
+registered and what each mailbox holds.
+
+### The session inbox socket is not used
+
+Claude Code exports `CLAUDE_CODE_MESSAGING_SOCKET` and
+`CLAUDE_CODE_MESSAGING_TOKEN` to hooks and Bash commands, for
+[cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging.md).
+This library does **not** deliver over that socket, for one measured reason: a
+raw write from a process that is not itself a Claude Code session is accepted
+and then goes nowhere. There is no response, no early close, and the same
+behavior for valid JSON, unknown record types and non-JSON alike; nothing is
+delivered and nothing is acknowledged. Delivered peer messages carry the
+sender's own socket path as their identity, which a non-session producer cannot
+supply. So the socket path is recorded in `addr.json` for diagnostics only, and
+the token is never stored anywhere - it is a credential, and there is nothing
+this library could do with it.
+
+Hooks, documented at [code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks),
+are the supported path, which is what `install` configures.
+
+## Claude Code (background wait, no hooks)
+
+The pull method still works and needs no configuration. The session runs, as a
+**background** bash command:
 
 ```sh
 agentqueue wait --to claude:reviewer --timeout 3600 --take
 ```
 
 Run it with `run_in_background`. The command blocks until a message is pending,
-claims the oldest one, prints it, and exits — and the harness resumes the
+claims the oldest one, prints it, and exits - and the harness resumes the
 session's turn with that output. Then acknowledge it:
 
 ```sh
@@ -79,12 +174,15 @@ agentqueue ack --to claude:reviewer <id>
 ```
 
 Exit codes matter here: `0` means a message arrived, **`3` means the timeout
-elapsed with nothing waiting** (not an error — just start another wait), and `1`
+elapsed with nothing waiting** (not an error - just start another wait), and `1`
 is a real failure.
 
 Without `--take`, `wait` prints every pending message in full and leaves them
 queued; that is the right choice when several consumers may read the same
 mailbox, or when you want to look before claiming.
+
+This is the agent-initiated half of the same queue: an item claimed by a hook
+is gone from `pending/`, so a concurrent `wait` will not show it again.
 
 ## Codex (push delivery)
 
@@ -123,16 +221,51 @@ out of `pending`, so exactly one consumer gets it even when several are racing �
 whereas a notice containing the body would deliver it before anybody claimed
 anything.
 
+Hook delivery is the one place a body does travel, and the same reasoning is
+why that is sound rather than an exception: the hook claims the item first and
+then renders it, so the injection *is* the claim. There is no window in which
+the body has been shown to a session that does not own it.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `push --to <target> [TEXT\|-]` | Enqueue a message and notify the agent. `-` or no text reads the body from stdin. `--meta k=v` is repeatable. |
+| `list --to <target> [--state pending\|claimed\|done]` | List what a mailbox holds. |
+| `take --to <target> [--next \| ID]` | Claim a message and print it, so no other consumer receives it. |
+| `ack --to <target> ID` | Mark a message done. |
+| `wait --to <target> [--timeout 3600] [--take]` | Block until a message arrives. For the background-wait method. |
+| `install [--agent claude] [--scope user\|project\|local]` | Detect the agents present and set up their integration. `--settings FILE` writes to a specific file, `--command PATH` sets how the binary is spelled in a hook, `--yes`, `--dry-run` and `--print` control confirmation. |
+| `uninstall [--agent claude]` | Remove the hooks `install` added, and only those. |
+| `hook claude` | Serve a Claude Code hook: read the payload on stdin, claim what is pending, inject it. `--max`, `--log`, `--to`, `--no-block`. Installed by `install`; not run by hand. |
+| `register` / `unregister` | Record or drop where a session can be reached. Reads the hook payload on stdin when there is one, otherwise the environment. |
+| `targets [--agent A] [--json]` | List the mailboxes under the queue root: counts, whether an address is registered, cwd, last update. |
+
+Every command takes `--root <dir>`; the root is resolved from `--root`,
+`$AGENTQUEUE_ROOT`, `$XDG_STATE_HOME/agentqueue`, then
+`~/.local/state/agentqueue`.
+
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. For `wait`, at least one message arrived. For `hook claude`, always - including when it failed internally, because a hook must not disrupt a session. |
+| `1` | An error occurred. |
+| `2` | A usage problem. |
+| `3` | `wait` timed out with no message. Not an error. |
+
 ## Storage layout
 
 ```
 <root>/
 └── <agent>/                    # "claude", "codex", ...
-    └── <name>/                 # session name or thread id
-        ├── pending/<id>.json   # queued, nobody has taken it
-        ├── claimed/<id>.json   # a consumer took it, not yet acknowledged
-        ├── done/<id>.json      # acknowledged
-        └── tmp/                # partial writes, never observed by a reader
+    ├── <name>/                 # session name or thread id
+    │   ├── pending/<id>.json   # queued, nobody has taken it
+    │   ├── claimed/<id>.json   # a consumer took it, not yet acknowledged
+    │   ├── done/<id>.json      # acknowledged
+    │   ├── addr.json           # where this session is, mode 0600
+    │   └── tmp/                # partial writes, never observed by a reader
+    └── _by_cwd/<cwd>/<name>    # empty marker: this session runs in this cwd
 ```
 
 Item ids are `<unix-millis>-<6 random bytes hex>`, so a directory listing sorts
@@ -203,6 +336,35 @@ that stamps `CreatedAt`.
 
 Sentinel errors: `ErrEmpty`, `ErrTimeout`, `ErrNotFound`, `ErrInvalidTarget`,
 `ErrNotify`.
+
+### Addresses
+
+A session records where it can be reached, so a producer can address it by
+session id or by working directory:
+
+```go
+type Address struct {
+	Agent        string
+	Name         string
+	Cwd          string
+	PID          int
+	UpdatedAt    time.Time
+	Socket       string // diagnostics only; see the socket note above
+	AgentVersion string
+}
+
+func (q *Queue) PutAddress(a Address) error
+func (q *Queue) Address(t Target) (*Address, error)   // ErrNotFound when unregistered
+func (q *Queue) RemoveAddress(t Target) error         // no address is not an error
+func (q *Queue) TargetsByCwd(agent, cwd string) ([]Target, error)
+```
+
+`PutAddress` writes `addr.json` with mode 0600 and tightens the queue root to
+0700. There is deliberately no field for the session's messaging token.
+
+`Mailboxes(agent string) ([]Mailbox, error)` walks the root and reports each
+target's pending, claimed and done counts along with its address, if any; an
+empty agent covers every agent. That is what `agentqueue targets` prints.
 
 ## Adding an agent
 

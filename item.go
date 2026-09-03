@@ -2,13 +2,15 @@
 // sessions.
 //
 // An external producer pushes a message for a named agent session; the session
-// consumes it. Delivery is per-agent: "claude" targets pull (the session itself
-// blocks on Wait), while "codex" targets are pushed an arrival notice.
+// consumes it. Delivery is per-agent: a "claude" session is delivered to by
+// Claude Code hooks, which claim pending items and inject them at the next
+// session boundary, and can also pull by blocking on Wait; a "codex" target is
+// pushed an arrival notice.
 //
 // Storage is a directory tree with one subtree per target. All state changes are
 // atomic renames, so multiple processes can share a queue root without locks.
 //
-// The library depends only on the standard library.
+// The library is pure Go and builds with CGO disabled.
 package agentqueue
 
 import (
