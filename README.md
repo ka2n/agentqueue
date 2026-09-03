@@ -60,8 +60,9 @@ agentqueue install
 ```
 
 It prints what it found - which agents are on your `$PATH`, how a message
-reaches each one, and what is left to configure - and asks which to set up.
-Claude Code needs hooks; Codex needs nothing.
+reaches each one, where each one's config would be written, and what is left to
+configure - and asks which to set up. Claude Code needs hooks; Codex needs
+nothing.
 
 ## Claude Code (hook delivery)
 
@@ -73,10 +74,71 @@ delivery path, and `agentqueue install` sets it up:
 agentqueue install --agent claude --scope user
 ```
 
-It prints the exact JSON block it will add and asks before writing (`--yes` to
-skip, `--dry-run` to see it and stop, `--print` to paste it in yourself), backs
-the settings file up to `<file>.agentqueue.bak`, and is idempotent: re-running
+Before writing anything it shows the change to your settings file and asks:
+
+- the file, whether it exists, and how big it is;
+- a count of what changes, in hook entries: `+5 hook entries, -0 removed, 0 modified`;
+- every hook event already in the file and what happens to it, including the
+  events agentqueue never touches - `PreToolUse: 4 existing entries kept, none
+  added`, so you can see they are accounted for;
+- a unified diff of the file before and after, with three lines of context;
+- the backup path, `<file>.agentqueue.bak`, written before the first change.
+
+Both sides of the diff are printed key-sorted, because writing the file
+re-encodes it as JSON and that sorts the keys: the key order on disk will
+change even where no value does, and a key-sorted diff shows the value changes
+only.
+
+**The presentation is backed by an enforced invariant.** install builds the
+prospective document, then verifies it against the original before anything
+reaches the disk: every hook entry that was already there is still present,
+under a wrapper that kept its other fields (`matcher` included); nothing
+outside `hooks` changed; and every entry that is new is an agentqueue command.
+If any of that does not hold, nothing is written and the command exits
+non-zero. `uninstall` enforces the mirror image: only entries whose command is
+an agentqueue command may disappear, nothing may be added, nothing outside
+`hooks` may change, and the wrappers and event lists that removal empties are
+pruned.
+
+The write itself goes through a temp file in the same directory and one
+rename, so an interrupt or a full disk part-way through leaves your
+`settings.json` exactly as it was rather than truncated, and the file keeps its
+own mode - a config you chmodded to `0600` does not come back
+world-readable.
+
+`--yes` skips the question, `--diff` prints the diff and exits without writing
+or asking, `--dry-run` prints the whole plan and stops, and `--print` emits
+just the hooks block to paste in yourself. Installing is idempotent: re-running
 it is a no-op. `agentqueue uninstall` removes only the entries it added.
+
+### Reinstalling after the binary moves
+
+An installed hook is recognised as agentqueue's own by the binary it runs,
+whatever path that binary sits at. So when the binary moves - a new
+`GOBIN`, a Nix store path, `--command` pointed somewhere else - a reinstall
+does not report "already installed" and leave the old path behind: it replaces
+every one of its own entries with exactly one per delivery point at the current
+path, and says `updated 5 hook(s) (command path changed)`. Repeated installs
+converge on the current path instead of accumulating copies. Your grouping is
+kept - the replacement goes back into the wrapper the old entry was in, matcher
+and all - and a flag you added to one of our commands by hand is carried over,
+because only `argv[0]` is rewritten. The same enforced invariant applies, with
+removals allowed for agentqueue's own entries only.
+
+### Why these hooks are not async
+
+Claude Code can run a hook asynchronously, and for a fire-and-forget observer
+that is the right thing: the session does not wait. **These hooks must stay
+synchronous.** Their *output is the protocol* - a delivered message travels in
+`hookSpecificOutput.additionalContext`, and the `Stop` hook's
+`decision: "block"` is what keeps the turn alive - and Claude Code reads
+neither from an async hook. An `"async": true` on one of these entries would
+silently deliver nothing, with no error to notice, which is why `install`
+never writes one and refuses to run if it finds one that was added by hand.
+
+It is also why `hook claude` has to stay fast: Claude Code waits for it, so it
+does a directory scan and a rename, with no network call and no transcript
+read.
 
 Then, from anywhere:
 
@@ -235,8 +297,8 @@ the body has been shown to a session that does not own it.
 | `take --to <target> [--next \| ID]` | Claim a message and print it, so no other consumer receives it. |
 | `ack --to <target> ID` | Mark a message done. |
 | `wait --to <target> [--timeout 3600] [--take]` | Block until a message arrives. For the background-wait method. |
-| `install [--agent claude] [--scope user\|project\|local]` | Detect the agents present and set up their integration. `--settings FILE` writes to a specific file, `--command PATH` sets how the binary is spelled in a hook, `--yes`, `--dry-run` and `--print` control confirmation. |
-| `uninstall [--agent claude]` | Remove the hooks `install` added, and only those. |
+| `install [--agent claude] [--scope user\|project\|local]` | Detect the agents present and set up their integration. Shows a unified diff of the settings file and refuses to write anything that is not the original plus agentqueue's own entries. `--settings FILE` writes to a specific file, `--command PATH` sets how the binary is spelled in a hook, `--yes`, `--diff`, `--dry-run` and `--print` control confirmation. |
+| `uninstall [--agent claude]` | Remove the hooks `install` added, and only those; `--diff`, `--dry-run` and `--yes` as above. |
 | `hook claude` | Serve a Claude Code hook: read the payload on stdin, claim what is pending, inject it. `--max`, `--log`, `--to`, `--no-block`. Installed by `install`; not run by hand. |
 | `register` / `unregister` | Record or drop where a session can be reached. Reads the hook payload on stdin when there is one, otherwise the environment. |
 | `targets [--agent A] [--json]` | List the mailboxes under the queue root: counts, whether an address is registered, cwd, last update. |

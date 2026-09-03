@@ -37,6 +37,15 @@ type hookEntry struct {
 // claudeHookEntries lists everything the claude integration needs, where
 // invocation is how the agentqueue binary is spelled in a hook command.
 //
+// These entries are deliberately synchronous: they carry no "async": true,
+// and they never may. Our stdout is the protocol - the delivered message
+// travels in hookSpecificOutput.additionalContext, and the Stop hook's
+// decision is what keeps the turn alive - and Claude Code reads neither from
+// an async hook. Marking these async would silently deliver nothing, with no
+// error to notice. That is also why `hook claude` has to stay fast: it scans
+// a directory and renames a file, with no network call and no transcript
+// read, because Claude Code waits for it.
+//
 // Each delivery point closes a different hole: SessionStart drains what was
 // queued while no session was running, UserPromptSubmit catches what arrived
 // while the session sat idle, and Stop is the only one that can act on a
@@ -153,6 +162,10 @@ func loadSettings(path string) (map[string]any, error) {
 	return settings, nil
 }
 
+// defaultSettingsMode is the mode a settings file gets when we are the ones
+// creating it. An existing file keeps its own mode.
+const defaultSettingsMode = os.FileMode(0o644)
+
 // saveSettings writes the settings back, indented, after taking a one-time
 // backup of whatever was there.
 func saveSettings(path string, settings map[string]any) error {
@@ -163,13 +176,68 @@ func saveSettings(path string, settings map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("encode settings: %w", err)
 	}
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
+	return writeFileAtomic(path, append(body, '\n'), settingsMode(path))
+}
+
+// settingsMode is the mode to write path with: its own, if it exists. A
+// settings file the user chmodded to 0600 must not come back world-readable
+// because we rewrote it.
+func settingsMode(path string) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		if mode := info.Mode().Perm(); mode != 0 {
+			return mode
+		}
+	}
+	return defaultSettingsMode
+}
+
+// writeFileAtomic writes body to path through a temp file in the same
+// directory and one rename.
+//
+// The point is what happens when the write does not finish: an interrupt, a
+// full disk or a crash part-way through leaves the temp file behind and the
+// user's settings.json exactly as it was. Writing in place would truncate it
+// first and leave half a config, which for this file means a Claude Code that
+// will not start. The temp file has to be a sibling, because rename is only
+// atomic within a filesystem.
+func writeFileAtomic(path string, body []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, append(body, '\n'), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".agentqueue-*")
+	if err != nil {
+		return fmt.Errorf("create a temporary file next to %s: %w", path, err)
+	}
+	tmpName := tmp.Name()
+	// Every failure from here on has to take the temp file with it.
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}()
+	if _, err := tmp.Write(body); err != nil {
+		return fmt.Errorf("write %s: %w", tmpName, err)
+	}
+	// CreateTemp makes the file 0600, which is not necessarily what the
+	// settings file had.
+	if err := tmp.Chmod(mode); err != nil {
+		return fmt.Errorf("set the mode on %s: %w", tmpName, err)
+	}
+	// Flush before the rename, so a crash cannot leave the renamed file
+	// holding nothing.
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("flush %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("move %s into place at %s: %w", tmpName, path, err)
 	}
 	return nil
 }
@@ -188,10 +256,9 @@ func backupSettings(path string) error {
 		}
 		return fmt.Errorf("read %s for backup: %w", path, err)
 	}
-	if err := os.WriteFile(backup, body, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", backup, err)
-	}
-	return nil
+	// The backup is a copy of the settings file, so it gets the same mode:
+	// a 0600 config must not be backed up world-readable.
+	return writeFileAtomic(backup, body, settingsMode(path))
 }
 
 // hooksSection returns settings["hooks"], optionally creating it.
@@ -257,6 +324,191 @@ func ownedCommand(cmd, invocation string) bool {
 	}
 	argv0 := strings.Trim(fields[0], `"'`)
 	return filepath.Base(argv0) == "agentqueue"
+}
+
+// splitArgv0 splits a hook command into the binary it runs and the rest of
+// the command line. It understands the single-quoted form shellQuote writes,
+// so a path with a space in it comes back in one piece.
+func splitArgv0(cmd string) (argv0, rest string) {
+	s := strings.TrimLeft(cmd, " \t")
+	if strings.HasPrefix(s, "'") {
+		if end := strings.Index(s[1:], "'"); end >= 0 {
+			return s[:end+2], s[end+2:]
+		}
+	}
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		return s[:i], s[i:]
+	}
+	return s, ""
+}
+
+// rewriteArgv0 points a command at a different binary, keeping its arguments.
+// It is how a hand-edited flag survives an update: only argv[0] moves.
+func rewriteArgv0(cmd, invocation string) string {
+	_, rest := splitArgv0(cmd)
+	return invocation + rest
+}
+
+// stalePathEntries lists the agentqueue hook commands that run a different
+// binary than the one being installed now.
+//
+// ownedCommand recognises an entry as ours by its argv[0] basename, whatever
+// path it sits at, and missingEntries then keys on the subcommand - so a hook
+// left over from a binary that has since moved reads as "already installed"
+// and would be left pointing at a path that no longer exists. Finding those
+// is what turns an install into an update.
+func stalePathEntries(settings map[string]any, invocation string) []string {
+	hooks := hooksSection(settings, false)
+	if hooks == nil {
+		return nil
+	}
+	var stale []string
+	for _, event := range sortedKeys(hooks) {
+		for _, cmd := range eventCommands(settings, event) {
+			if !ownedCommand(cmd, invocation) {
+				continue
+			}
+			if argv0, _ := splitArgv0(strings.TrimSpace(cmd)); argv0 != invocation {
+				stale = append(stale, cmd)
+			}
+		}
+	}
+	return stale
+}
+
+// asyncOwnedEntries lists agentqueue hook entries that were marked
+// "async": true by hand.
+//
+// An async hook's output is not read, and our output is the whole delivery
+// mechanism, so such an entry delivers nothing while looking installed.
+// Rather than rewrite somebody's hand edit, install stops and says so.
+func asyncOwnedEntries(settings map[string]any, invocation string) []string {
+	hooks := hooksSection(settings, false)
+	if hooks == nil {
+		return nil
+	}
+	var async []string
+	for _, event := range sortedKeys(hooks) {
+		groups, _ := hooks[event].([]any)
+		for _, g := range groups {
+			group, ok := g.(map[string]any)
+			if !ok {
+				continue
+			}
+			inner, _ := group["hooks"].([]any)
+			for _, h := range inner {
+				hook, ok := h.(map[string]any)
+				if !ok {
+					continue
+				}
+				cmd, _ := hook["command"].(string)
+				if !ownedCommand(cmd, invocation) {
+					continue
+				}
+				if on, _ := hook["async"].(bool); on {
+					async = append(async, event+": "+cmd)
+				}
+			}
+		}
+	}
+	return async
+}
+
+// convergeEntries rewrites agentqueue's own hooks so the settings file holds
+// exactly the entries this invocation would install, and nothing left over
+// from an older path.
+//
+// It takes every owned entry out and puts one back per entry in desired,
+// which is what makes repeated installs converge instead of accumulating. Two
+// details matter to the user: the replacement goes into the wrapper group the
+// first owned entry was found in, so their own grouping survives, and a
+// hand-edited flag is carried over by rewriting only argv[0] of the command
+// it was on. Entries on events we no longer install are dropped.
+func convergeEntries(settings map[string]any, invocation string, desired []hookEntry) (added, removed []string, err error) {
+	hooks := hooksSection(settings, true)
+	if hooks == nil {
+		return nil, nil, errors.New(`the settings file has a "hooks" key that is not an object; fix it or use --print`)
+	}
+	wanted := map[string]bool{}
+	for _, e := range desired {
+		wanted[e.Event] = true
+	}
+
+	// anchors[event] is the wrapper the event's replacement entries go into,
+	// and oldCommands[event+action] is the command they inherit their flags
+	// from.
+	anchors := map[string]map[string]any{}
+	oldCommands := map[string]string{}
+	for _, event := range sortedKeys(hooks) {
+		groups, ok := hooks[event].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(groups))
+		for _, g := range groups {
+			group, ok := g.(map[string]any)
+			if !ok {
+				kept = append(kept, g)
+				continue
+			}
+			inner, ok := group["hooks"].([]any)
+			if !ok {
+				kept = append(kept, g)
+				continue
+			}
+			isAnchor := false
+			keptInner := make([]any, 0, len(inner))
+			for _, h := range inner {
+				hook, ok := h.(map[string]any)
+				if !ok {
+					keptInner = append(keptInner, h)
+					continue
+				}
+				cmd, _ := hook["command"].(string)
+				if cmd == "" || !ownedCommand(cmd, invocation) {
+					keptInner = append(keptInner, h)
+					continue
+				}
+				removed = append(removed, cmd)
+				if key := event + "\x00" + actionKey(cmd); oldCommands[key] == "" {
+					oldCommands[key] = cmd
+				}
+				if anchors[event] == nil {
+					anchors[event] = group
+					isAnchor = true
+				}
+			}
+			if len(keptInner) == 0 && !(isAnchor && wanted[event]) {
+				// The wrapper existed only to hold entries that are going,
+				// and nothing is going back into it.
+				continue
+			}
+			group["hooks"] = keptInner
+			kept = append(kept, group)
+		}
+		if len(kept) == 0 {
+			delete(hooks, event)
+			continue
+		}
+		hooks[event] = kept
+	}
+
+	for _, e := range desired {
+		cmd := e.Command
+		if old, ok := oldCommands[e.Event+"\x00"+actionKey(e.Command)]; ok {
+			cmd = rewriteArgv0(old, invocation)
+		}
+		entry := map[string]any{"type": "command", "command": cmd}
+		if anchor := anchors[e.Event]; anchor != nil {
+			inner, _ := anchor["hooks"].([]any)
+			anchor["hooks"] = append(inner, entry)
+		} else {
+			groups, _ := hooks[e.Event].([]any)
+			hooks[e.Event] = append(groups, map[string]any{"hooks": []any{entry}})
+		}
+		added = append(added, cmd)
+	}
+	return added, removed, nil
 }
 
 // actionKey is the subcommand path of a hook command, ignoring flags: it turns
@@ -431,10 +683,11 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 		command  = fs.String("command", "", "how to spell the agentqueue binary in a hook command")
 		yes      = fs.Bool("yes", false, "do not ask for confirmation")
 		dryRun   = fs.Bool("dry-run", false, "print what would be added and exit without writing")
+		diffOnly = fs.Bool("diff", false, "print the diff of the settings file and exit without writing or asking")
 		printer  = fs.Bool("print", false, "print the hooks block to paste in by hand and exit")
 	)
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue install [--agent claude] [--scope user|project|local] [--settings FILE] [--command PATH] [--yes] [--dry-run] [--print]", err)
+		return fmt.Errorf("%w\nusage: agentqueue install [--agent claude] [--scope user|project|local] [--settings FILE] [--command PATH] [--yes] [--dry-run] [--diff] [--print]", err)
 	}
 
 	invocation, err := resolveHookCommand(*command, currentExe(), realBinEnv().look)
@@ -458,7 +711,7 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 		return err
 	}
 	for _, info := range chosen {
-		if err := installAgent(info, path, invocation, *yes, *dryRun, stdin, stdout, stderr); err != nil {
+		if err := installAgent(info, path, invocation, *yes, *dryRun, *diffOnly, stdin, stdout, stderr); err != nil {
 			return err
 		}
 	}
@@ -507,7 +760,21 @@ func printAgentTable(stdout io.Writer, infos []agentInfo, path, invocation strin
 		fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\n", i+1, info.Name, info.versionLabel(), info.Delivery, setupState(info, installed))
 	}
 	_ = tw.Flush()
-	fmt.Fprintf(stdout, "\nclaude hooks are written to %s\n", path)
+	// Where each choice would write, printed before the choice is made: the
+	// destination is the part of this that is hard to undo.
+	fmt.Fprintln(stdout)
+	for _, info := range infos {
+		switch {
+		case !info.Found:
+			fmt.Fprintf(stdout, "%s is not on $PATH, so nothing would be written for it\n", info.Name)
+		case info.setup == setupHooks:
+			fmt.Fprintf(stdout, "%s hooks are written to %s\n", info.Name, path)
+		case info.setup == setupNone:
+			fmt.Fprintf(stdout, "%s needs no configuration, so no file is written for it\n", info.Name)
+		default:
+			fmt.Fprintf(stdout, "%s has no integration in this release, so no file is written for it\n", info.Name)
+		}
+	}
 }
 
 // promptForAgents asks which agents to set up.
@@ -547,7 +814,7 @@ func readLine(stdin io.Reader) (string, error) {
 }
 
 // installAgent sets up one agent, or explains why there is nothing to do.
-func installAgent(info agentInfo, path, invocation string, yes, dryRun bool, stdin io.Reader, stdout, stderr io.Writer) error {
+func installAgent(info agentInfo, path, invocation string, yes, dryRun, diffOnly bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	if !info.Found {
 		fmt.Fprintf(stdout, "%s: not found on $PATH, nothing to set up\n", info.Name)
 		return nil
@@ -560,24 +827,93 @@ func installAgent(info agentInfo, path, invocation string, yes, dryRun bool, std
 		fmt.Fprintf(stdout, "%s: not supported yet (its integration would be a JS extension, which this release does not ship); nothing written\n", info.Name)
 		return nil
 	}
-	return installClaudeHooks(path, invocation, yes, dryRun, stdin, stdout)
+	return installClaudeHooks(path, invocation, yes, dryRun, diffOnly, stdin, stdout)
 }
 
 // installClaudeHooks merges the claude hook entries into the settings file.
-func installClaudeHooks(path, invocation string, yes, dryRun bool, stdin io.Reader, stdout io.Writer) error {
-	settings, err := loadSettings(path)
+//
+// The order is: build the prospective document, prove it safe, show the user
+// the real diff, then write. Nothing reaches the disk before
+// verifyMergeSafe agrees that the change is the original file plus our own
+// entries and nothing else.
+func installClaudeHooks(path, invocation string, yes, dryRun, diffOnly bool, stdin io.Reader, stdout io.Writer) error {
+	before, err := loadSettings(path)
 	if err != nil {
 		return err
 	}
-	missing := missingEntries(settings, invocation, claudeHookEntries(invocation))
-	if len(missing) == 0 {
-		fmt.Fprintf(stdout, "claude: hooks already installed in %s, nothing to do\n", path)
-		return nil
+	desired := claudeHookEntries(invocation)
+
+	// A hand-added "async": true on one of our hooks stops delivery dead, and
+	// silently, so it is not something to write around.
+	if async := asyncOwnedEntries(before, invocation); len(async) > 0 {
+		return fmt.Errorf(`%s has agentqueue hooks marked "async": true:
+  %s
+An async hook's output is never read, and the delivered message travels in
+this hook's output, so those entries deliver nothing. Remove the "async" field
+(or run `+"`agentqueue uninstall`"+` and install again), then re-run this`,
+			path, strings.Join(async, "\n  "))
 	}
 
-	fmt.Fprintf(stdout, "claude: adding to %s:\n", path)
-	if err := printJSON(stdout, hookBlock(missing)); err != nil {
+	after, err := cloneSettings(before)
+	if err != nil {
 		return err
+	}
+
+	// Three outcomes: our hooks point at a different binary and have to be
+	// rewritten, some are missing and get added, or there is nothing to do.
+	stale := stalePathEntries(before, invocation)
+	missing := missingEntries(before, invocation, desired)
+	updating := len(stale) > 0
+	switch {
+	case updating:
+		addedCommands, removedCommands, err := convergeEntries(after, invocation, desired)
+		if err != nil {
+			return err
+		}
+		if err := verifyUpdateSafe(before, after, invocation); err != nil {
+			return fmt.Errorf("refusing to write %s: the update would touch more than agentqueue's own hooks: %w", path, err)
+		}
+		missing = desired
+		fmt.Fprintf(stdout, "claude: the hooks in %s run a different agentqueue binary than this one:\n", path)
+		for _, cmd := range stale {
+			fmt.Fprintf(stdout, "    %s\n", cmd)
+		}
+		fmt.Fprintf(stdout, "  so %d entr%s are replaced by %d pointing at %s, one per delivery point:\n",
+			len(removedCommands), plural(len(removedCommands), "y", "ies"), len(addedCommands), invocation)
+	case len(missing) == 0:
+		fmt.Fprintf(stdout, "claude: hooks already installed in %s, nothing to do\n", path)
+		return nil
+	default:
+		if err := mergeEntries(after, missing); err != nil {
+			return err
+		}
+		if err := verifyMergeSafe(before, after, invocation); err != nil {
+			return fmt.Errorf("refusing to write %s: the merge would not be additive: %w", path, err)
+		}
+		fmt.Fprintf(stdout, "claude: %d hook(s) to add, merged into the existing hooks:\n", len(missing))
+	}
+	verb := "install"
+	if updating {
+		verb = "update"
+	}
+	if err := printChangePlan(stdout, path, verb, before, after); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "  backup:  %s (written before the first change)\n", path+settingsBackupSuffix)
+	printPathWarning(stdout, invocation)
+	if updating {
+		fmt.Fprintln(stdout, "  checked: every entry belonging to anything else survives, nothing outside")
+		fmt.Fprintln(stdout, "           \"hooks\" changes, and every entry that goes or arrives is an")
+		fmt.Fprintln(stdout, "           agentqueue command. The write is refused if that does not hold.")
+	} else {
+		fmt.Fprintln(stdout, "  checked: every entry already in the file survives, nothing outside \"hooks\"")
+		fmt.Fprintln(stdout, "           changes, and every added entry is an agentqueue command. The")
+		fmt.Fprintln(stdout, "           write is refused if that does not hold.")
+	}
+
+	if diffOnly {
+		fmt.Fprintln(stdout, "--diff: nothing written")
+		return nil
 	}
 	if dryRun {
 		fmt.Fprintln(stdout, "--dry-run: nothing written")
@@ -585,9 +921,9 @@ func installClaudeHooks(path, invocation string, yes, dryRun bool, stdin io.Read
 	}
 	if !yes {
 		if !isTTY(stdin) {
-			return errors.New("cannot ask for confirmation without a terminal: pass --yes, --dry-run or --print")
+			return errors.New("cannot ask for confirmation without a terminal: pass --yes, --dry-run, --diff or --print")
 		}
-		fmt.Fprint(stdout, "Add it? [y/N] ")
+		fmt.Fprint(stdout, "Proceed? [y/N] ")
 		line, err := readLine(stdin)
 		if err != nil {
 			return err
@@ -599,15 +935,16 @@ func installClaudeHooks(path, invocation string, yes, dryRun bool, stdin io.Read
 			return nil
 		}
 	}
-	if err := mergeEntries(settings, missing); err != nil {
-		return err
-	}
 	// saveSettings backs up the file as it is on disk before writing, so the
 	// pre-install state is what lands in the .agentqueue.bak copy.
-	if err := saveSettings(path, settings); err != nil {
+	if err := saveSettings(path, after); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "claude: installed %d hook(s) into %s (backup: %s)\n", len(missing), path, path+settingsBackupSuffix)
+	if updating {
+		fmt.Fprintf(stdout, "claude: updated %d hook(s) (command path changed) in %s (backup: %s)\n", len(missing), path, path+settingsBackupSuffix)
+	} else {
+		fmt.Fprintf(stdout, "claude: installed %d hook(s) into %s (backup: %s)\n", len(missing), path, path+settingsBackupSuffix)
+	}
 	fmt.Fprintln(stdout, "Restart or start a Claude Code session for the hooks to take effect.")
 	return nil
 }
@@ -623,9 +960,10 @@ func cmdUninstall(args []string, stdin io.Reader, stdout io.Writer) error {
 		command  = fs.String("command", "", "how the agentqueue binary is spelled in the installed hooks")
 		yes      = fs.Bool("yes", false, "do not ask for confirmation")
 		dryRun   = fs.Bool("dry-run", false, "print what would be removed and exit without writing")
+		diffOnly = fs.Bool("diff", false, "print the diff of the settings file and exit without writing or asking")
 	)
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue uninstall [--agent claude] [--scope user|project|local] [--settings FILE] [--yes] [--dry-run]", err)
+		return fmt.Errorf("%w\nusage: agentqueue uninstall [--agent claude] [--scope user|project|local] [--settings FILE] [--yes] [--dry-run] [--diff]", err)
 	}
 	if name := strings.TrimSpace(*agent); name != "claude" {
 		fmt.Fprintf(stdout, "%s: nothing was ever written for it, nothing to remove\n", name)
@@ -639,18 +977,35 @@ func cmdUninstall(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	current, err := loadSettings(path)
+	before, err := loadSettings(path)
 	if err != nil {
 		return err
 	}
-	removed := removeOwnedEntries(current, invocation)
+	after, err := cloneSettings(before)
+	if err != nil {
+		return err
+	}
+	removed := removeOwnedEntries(after, invocation)
 	if len(removed) == 0 {
 		fmt.Fprintf(stdout, "claude: no agentqueue hooks in %s, nothing to do\n", path)
 		return nil
 	}
-	fmt.Fprintf(stdout, "claude: removing from %s:\n", path)
+	if err := verifyUninstallSafe(before, after, invocation); err != nil {
+		return fmt.Errorf("refusing to write %s: the removal would touch more than agentqueue's own hooks: %w", path, err)
+	}
+	fmt.Fprintf(stdout, "claude: %d hook(s) to remove from %s:\n", len(removed), path)
 	for _, cmd := range removed {
-		fmt.Fprintf(stdout, "  %s\n", cmd)
+		fmt.Fprintf(stdout, "    %s\n", cmd)
+	}
+	if err := printChangePlan(stdout, path, "uninstall", before, after); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "  backup:  %s (written before the first change)\n", path+settingsBackupSuffix)
+	fmt.Fprintln(stdout, "  checked: only agentqueue's own entries go, nothing outside \"hooks\" changes,")
+	fmt.Fprintln(stdout, "           and nothing is added. Wrappers and events left empty are pruned.")
+	if *diffOnly {
+		fmt.Fprintln(stdout, "--diff: nothing written")
+		return nil
 	}
 	if *dryRun {
 		fmt.Fprintln(stdout, "--dry-run: nothing written")
@@ -658,9 +1013,9 @@ func cmdUninstall(args []string, stdin io.Reader, stdout io.Writer) error {
 	}
 	if !*yes {
 		if !isTTY(stdin) {
-			return errors.New("cannot ask for confirmation without a terminal: pass --yes or --dry-run")
+			return errors.New("cannot ask for confirmation without a terminal: pass --yes, --dry-run or --diff")
 		}
-		fmt.Fprint(stdout, "Remove it? [y/N] ")
+		fmt.Fprint(stdout, "Proceed? [y/N] ")
 		line, err := readLine(stdin)
 		if err != nil {
 			return err
@@ -672,7 +1027,7 @@ func cmdUninstall(args []string, stdin io.Reader, stdout io.Writer) error {
 			return nil
 		}
 	}
-	if err := saveSettings(path, current); err != nil {
+	if err := saveSettings(path, after); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "claude: removed %d hook(s) from %s\n", len(removed), path)
