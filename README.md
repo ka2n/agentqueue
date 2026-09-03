@@ -118,7 +118,8 @@ whatever path that binary sits at. So when the binary moves - a new
 `GOBIN`, a Nix store path, `--command` pointed somewhere else - a reinstall
 does not report "already installed" and leave the old path behind: it replaces
 every one of its own entries with exactly one per delivery point at the current
-path, and says `updated 5 hook(s) (command path changed)`. Repeated installs
+path, and says
+`updated 5 hook(s) in <file> (command changed from <old> to <new>)`. Repeated installs
 converge on the current path instead of accumulating copies. Your grouping is
 kept - the replacement goes back into the wrapper the old entry was in, matcher
 and all - and a flag you added to one of our commands by hand is carried over,

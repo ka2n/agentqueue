@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -374,6 +375,24 @@ func stalePathEntries(settings map[string]any, invocation string) []string {
 		}
 	}
 	return stale
+}
+
+// staleCommandSummary names the binary the stale entries were running, for
+// the "command changed from X to Y" line. Normally they all ran the same one;
+// if a config somehow collected several, all of them are named rather than
+// picking one to report.
+func staleCommandSummary(stale []string) string {
+	var seen []string
+	for _, cmd := range stale {
+		argv0, _ := splitArgv0(strings.TrimSpace(cmd))
+		if !slices.Contains(seen, argv0) {
+			seen = append(seen, argv0)
+		}
+	}
+	if len(seen) == 0 {
+		return "an older command"
+	}
+	return strings.Join(seen, ", ")
 }
 
 // asyncOwnedEntries lists agentqueue hook entries that were marked
@@ -862,6 +881,7 @@ this hook's output, so those entries deliver nothing. Remove the "async" field
 	// Three outcomes: our hooks point at a different binary and have to be
 	// rewritten, some are missing and get added, or there is nothing to do.
 	stale := stalePathEntries(before, invocation)
+	from := staleCommandSummary(stale)
 	missing := missingEntries(before, invocation, desired)
 	updating := len(stale) > 0
 	switch {
@@ -941,7 +961,10 @@ this hook's output, so those entries deliver nothing. Remove the "async" field
 		return err
 	}
 	if updating {
-		fmt.Fprintf(stdout, "claude: updated %d hook(s) (command path changed) in %s (backup: %s)\n", len(missing), path, path+settingsBackupSuffix)
+		// The backup path was printed with the plan above, so it is not
+		// repeated here: what matters now is which command the hooks moved to.
+		fmt.Fprintf(stdout, "claude: updated %d hook(s) in %s (command changed from %s to %s)\n",
+			len(missing), path, from, invocation)
 	} else {
 		fmt.Fprintf(stdout, "claude: installed %d hook(s) into %s (backup: %s)\n", len(missing), path, path+settingsBackupSuffix)
 	}

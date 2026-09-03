@@ -44,10 +44,13 @@ type changeSummary struct {
 // summarizeChange counts what the edit does to the hook entries, from the two
 // documents themselves.
 //
-// A "modified" entry is one that leaves and comes back on the same event
-// under the same action - "hook claude" for example - with different flags:
-// the multiset diff sees a removal and an addition, but the user sees one
-// entry rewritten, so the pair is reported that way and not double-counted.
+// Added and Removed are the raw counts: an entry that is rewritten really
+// does leave and come back, and hiding that would be the same kind of
+// half-truth as printing only the block being added. Modified counts how many
+// of those add/remove pairs are the same hook on the same event under the
+// same action - "hook claude" for example - rewritten rather than replaced,
+// so the user can tell five rewrites from five removals plus five unrelated
+// additions. It overlaps Added and Removed on purpose.
 func summarizeChange(before, after map[string]any) changeSummary {
 	beforeHooks, _ := hooksObject(before)
 	afterHooks, _ := hooksObject(after)
@@ -96,10 +99,7 @@ func summarizeChange(before, after map[string]any) changeSummary {
 				continue
 			}
 			pairedAdd[i] = true
-			e := get(r.Event)
-			e.Modified++
-			e.Added--
-			e.Removed--
+			get(r.Event).Modified++
 			break
 		}
 	}
@@ -107,7 +107,7 @@ func summarizeChange(before, after map[string]any) changeSummary {
 	out := changeSummary{}
 	for _, event := range sortedEventKeys(perEvent) {
 		e := perEvent[event]
-		e.Kept = e.Existing - e.Removed - e.Modified
+		e.Kept = e.Existing - e.Removed
 		if e.Kept < 0 {
 			e.Kept = 0
 		}
@@ -191,6 +191,11 @@ func printChangePlan(w io.Writer, path, verb string, before, after map[string]an
 
 	sum := summarizeChange(before, after)
 	fmt.Fprintf(w, "  change:  +%d hook entries, -%d removed, %d modified\n", sum.Added, sum.Removed, sum.Modified)
+	if sum.Modified > 0 {
+		fmt.Fprintf(w, "           the %d modified %s counted in both columns above: the same hook,\n",
+			sum.Modified, plural(sum.Modified, "is", "are"))
+		fmt.Fprintln(w, "           removed and added back rewritten - not an entry gained or lost.")
+	}
 
 	if len(sum.Events) > 0 {
 		fmt.Fprintln(w, "  events:  every hook event in the file, and what happens to it:")

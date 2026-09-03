@@ -479,15 +479,20 @@ func TestSummarizeChangeCountsEntries(t *testing.T) {
 }
 
 // TestSummarizeChangeCountsARewriteAsModified covers the same hook rewritten
-// with different flags: one entry changed, not one lost and one gained.
+// with different flags. The removal and the addition are both reported - they
+// really do happen - and Modified says the pair is one entry rewritten rather
+// than an entry lost and an unrelated one gained.
 func TestSummarizeChangeCountsARewriteAsModified(t *testing.T) {
 	before := doc(t, `{"hooks": {"Stop": [{"hooks": [
 		{"type": "command", "command": "/opt/aq/agentqueue hook claude"}]}]}}`)
 	after := doc(t, `{"hooks": {"Stop": [{"hooks": [
 		{"type": "command", "command": "/opt/aq/agentqueue hook claude --no-block"}]}]}}`)
 	sum := summarizeChange(before, after)
-	if sum.Added != 0 || sum.Removed != 0 || sum.Modified != 1 {
-		t.Fatalf("summary = +%d -%d ~%d, want +0 -0 ~1", sum.Added, sum.Removed, sum.Modified)
+	if sum.Added != 1 || sum.Removed != 1 || sum.Modified != 1 {
+		t.Fatalf("summary = +%d -%d ~%d, want +1 -1 ~1", sum.Added, sum.Removed, sum.Modified)
+	}
+	if len(sum.Events) != 1 || sum.Events[0].Kept != 0 {
+		t.Fatalf("events = %+v, want the rewritten entry counted as removed, not kept", sum.Events)
 	}
 }
 

@@ -760,8 +760,20 @@ func TestInstallConvergesOnTheCurrentCommandPath(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("reinstall exit = %d (stderr: %s)", code, errOut.String())
 	}
-	if !strings.Contains(out.String(), "updated 5 hook(s) (command path changed)") {
-		t.Fatalf("reinstall output = %q, want the update notice", out.String())
+	wantNotice := "updated 5 hook(s) in " + path + " (command changed from " + oldCommand + " to " + newCommand + ")"
+	if !strings.Contains(out.String(), wantNotice) {
+		t.Fatalf("reinstall output = %q, want %q", out.String(), wantNotice)
+	}
+	// The summary tells the truth about the removals rather than hiding them
+	// behind the rewrite pairing.
+	for _, want := range []string{
+		"change:  +5 hook entries, -5 removed, 5 modified",
+		"SessionStart: 0 existing entries kept, 2 added, 2 removed, 2 modified",
+		"PreToolUse: 1 existing entry kept, none added",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("reinstall output is missing %q:\n%s", want, out.String())
+		}
 	}
 
 	settings := readSettings(t, path)
@@ -956,5 +968,96 @@ func TestStalePathEntries(t *testing.T) {
 		{"type": "command", "command": "/opt/aq/agentqueue hook claude --no-block"}]}]}}`)
 	if got := stalePathEntries(flagged, "/opt/aq/agentqueue"); len(got) != 0 {
 		t.Fatalf("stalePathEntries = %v, want none for a customized flag", got)
+	}
+}
+
+// TestSettingsWriteCleansUpAfterAFailure is the other half of the atomic
+// write: when the rename cannot happen, the temp file must not be left lying
+// next to the user's config. A directory in place of the settings file is a
+// cheap way to make the rename fail after the temp file has been written.
+func TestSettingsWriteCleansUpAfterAFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("create the directory standing in for the settings file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "keep"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed the directory: %v", err)
+	}
+	if err := saveSettings(path, map[string]any{"model": "opus"}); err == nil {
+		t.Fatal("saveSettings reported success writing over a directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "settings.json" {
+			t.Fatalf("a failed write left %q behind in %s", e.Name(), dir)
+		}
+	}
+}
+
+// TestInstallUpdateAcrossTwoWrapperGroups covers owned entries spread over
+// two wrapper groups on the same event, which is what a config that was
+// installed twice by different versions looks like: the replacement is one
+// entry, in the group the first one was found in, and the group that held
+// only the other copy goes away.
+func TestInstallUpdateAcrossTwoWrapperGroups(t *testing.T) {
+	const newCommand = "/new/place/agentqueue"
+	path := filepath.Join(t.TempDir(), "settings.json")
+	seed := map[string]any{
+		"hooks": map[string]any{
+			eventStop: []any{
+				map[string]any{"matcher": "first", "hooks": []any{
+					map[string]any{"type": "command", "command": "/opt/other/notify.sh"},
+					map[string]any{"type": "command", "command": "/old/place/agentqueue hook claude"},
+				}},
+				map[string]any{"hooks": []any{
+					map[string]any{"type": "command", "command": "/older/still/agentqueue hook claude"},
+				}},
+			},
+		},
+	}
+	body, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := run(context.Background(),
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes"},
+		strings.NewReader(""), &out, &errOut)
+	if code != exitOK {
+		t.Fatalf("install exit = %d (stderr: %s)", code, errOut.String())
+	}
+	settings := readSettings(t, path)
+	if diff := cmp.Diff([]string{
+		"/opt/other/notify.sh",
+		newCommand + " hook claude",
+	}, commandsFor(t, settings, eventStop)); diff != "" {
+		t.Fatalf("Stop mismatch (-want +got):\n%s", diff)
+	}
+	hooks, _ := settings["hooks"].(map[string]any)
+	groups, _ := hooks[eventStop].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("Stop has %d wrapper groups, want the emptied one pruned:\n%s", len(groups), mustRead(t, path))
+	}
+	group, _ := groups[0].(map[string]any)
+	if group["matcher"] != "first" {
+		t.Fatalf("the surviving wrapper is not the one that held the first owned entry: %v", group["matcher"])
+	}
+	// Both old paths are gone, and the notice names them.
+	after := string(mustRead(t, path))
+	for _, gone := range []string{"/old/place/agentqueue", "/older/still/agentqueue"} {
+		if strings.Contains(after, gone) {
+			t.Fatalf("%s survives the update:\n%s", gone, after)
+		}
+		if !strings.Contains(out.String(), gone) {
+			t.Fatalf("the update notice does not mention %s:\n%s", gone, out.String())
+		}
 	}
 }
