@@ -12,14 +12,15 @@ import (
 	"time"
 
 	"github.com/ka2n/agentqueue"
+	crosshooks "github.com/ka2n/crossagent/hooks"
 )
 
 // Hook event names this command acts on. Every other event is ignored.
 const (
-	eventSessionStart     = "SessionStart"
-	eventUserPromptSubmit = "UserPromptSubmit"
-	eventStop             = "Stop"
-	eventSubagentStop     = "SubagentStop"
+	eventSessionStart     = string(crosshooks.EventSessionStart)
+	eventUserPromptSubmit = string(crosshooks.EventUserPromptSubmit)
+	eventStop             = string(crosshooks.EventStop)
+	eventSubagentStop     = string(crosshooks.EventSubagentStop)
 )
 
 // selfCheckToken is deliberately stable: install uses it to prove that the
@@ -29,7 +30,7 @@ const selfCheckToken = "agentqueue hook claude: self-check ok"
 
 // sourceCompact is the SessionStart source that means context is being rebuilt
 // after compaction rather than a new session beginning.
-const sourceCompact = "compact"
+const sourceCompact = crosshooks.SourceCompact
 
 // defaultHookMax is how many items one hook invocation delivers.
 const defaultHookMax = 5

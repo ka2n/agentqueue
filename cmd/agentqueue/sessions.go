@@ -11,7 +11,24 @@ import (
 	"time"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/paths"
+	crosssessions "github.com/ka2n/crossagent/sessions"
 )
+
+// sessionRow is the CLI view of a crossagent session. Mailbox and Registered
+// are queue facts, not session-discovery facts, so they are joined here from
+// agentqueue's mailbox directories and addr.json records.
+type sessionRow struct {
+	Agent        string    `json:"agent"`
+	SessionID    string    `json:"session_id"`
+	Cwd          string    `json:"cwd"`
+	Label        string    `json:"label,omitempty"`
+	LastActivity time.Time `json:"last_activity"`
+	Source       string    `json:"source"`
+	State        string    `json:"state"`
+	Mailbox      bool      `json:"mailbox"`
+	Registered   bool      `json:"registered"`
+}
 
 func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := newFlagSet("sessions")
@@ -19,10 +36,10 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 	cwd := fs.String("cwd", "", "restrict results to this working directory")
 	asJSON := fs.Bool("json", false, "print JSON instead of a table")
 	limit := fs.Int("limit", 0, "show at most N sessions (zero means all)")
-	maxAge := fs.Duration("max-age", 7*24*time.Hour, "skip Claude transcript files older than this duration")
+	maxAge := fs.Duration("max-age", crosssessions.DefaultClaudeMaxAge, "skip Claude transcript files older than this duration")
 	setFlagUsage(fs, stdout, args,
 		"agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--limit N] [--max-age DURATION] [--json]",
-		"List where sessions are recorded: id, working directory, label, activity, queue status and SOURCE. This reports location metadata, not process liveness. STATE is copied only from Claude's own CLI when present and is empty otherwise; no state is computed and /proc is never read. Claude's transcript scan always runs alongside claude agents --json because the CLI may omit interactive sessions.")
+		"List session locations discovered by crossagent and join them with agentqueue mailbox/address state, including SOURCE and STATE. This reports location metadata, not process liveness; no process probing is performed and /proc is never read.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--limit N] [--max-age DURATION] [--json]", err)
 	}
@@ -45,23 +62,41 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 		cwdFilter = filepath.Clean(cwdFilter)
 	}
+
 	root, err := resolveRoot("", os.Getenv)
 	if err != nil {
 		return err
 	}
-	listers := agentqueue.NewSessionListers(agentqueue.SessionListerOptions{
-		QueueRoot:    root,
+	q, err := agentqueue.Open(root)
+	if err != nil {
+		return err
+	}
+	boxes, err := q.Mailboxes("")
+	if err != nil {
+		return fmt.Errorf("read queue status: %w", err)
+	}
+	status := make(map[string]queueSessionStatus, len(boxes))
+	for _, box := range boxes {
+		status[sessionStatusKey(box.Target.Agent, box.Target.Name)] = queueSessionStatus{
+			mailbox:    true,
+			registered: box.Address != nil,
+		}
+	}
+
+	options := crosssessions.SessionListerOptions{
+		Resolver:     paths.DefaultResolver(),
 		ClaudeMaxAge: *maxAge,
-	})
+	}
+	listers := crosssessions.NewSessionListers(options)
 	names := []string{"claude", "codex", "pi"}
-	if value := strings.TrimSpace(*agent); value != "" {
+	if value := strings.ToLower(strings.TrimSpace(*agent)); value != "" {
 		if _, ok := listers[value]; !ok {
 			return fmt.Errorf("unknown agent %q: want claude, codex or pi", value)
 		}
 		names = []string{value}
 	}
 
-	sessions := make([]agentqueue.Session, 0)
+	discovered := make([]crosssessions.Session, 0)
 	for _, name := range names {
 		found, err := listers[name].List(ctx)
 		if err != nil {
@@ -71,21 +106,44 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 			if cwdFilter != "" && filepath.Clean(session.Cwd) != cwdFilter {
 				continue
 			}
-			sessions = append(sessions, session)
+			discovered = append(discovered, session)
 		}
 	}
-	agentqueue.SortSessions(sessions)
-	if *limit > 0 && len(sessions) > *limit {
-		sessions = sessions[:*limit]
+	crosssessions.SortSessions(discovered)
+	if *limit > 0 && len(discovered) > *limit {
+		discovered = discovered[:*limit]
+	}
+
+	rows := make([]sessionRow, 0, len(discovered))
+	for _, session := range discovered {
+		state := status[sessionStatusKey(session.Agent, session.SessionID)]
+		rows = append(rows, sessionRow{
+			Agent:        session.Agent,
+			SessionID:    session.SessionID,
+			Cwd:          session.Cwd,
+			Label:        session.Label,
+			LastActivity: session.LastActivity,
+			Source:       session.Source,
+			State:        session.State,
+			Mailbox:      state.mailbox,
+			Registered:   state.registered,
+		})
 	}
 	if *asJSON {
-		return printJSON(stdout, sessions)
+		return printJSON(stdout, rows)
 	}
-	printSessionTable(stdout, sessions)
+	printSessionTable(stdout, rows)
 	return nil
 }
 
-func printSessionTable(stdout io.Writer, sessions []agentqueue.Session) {
+type queueSessionStatus struct {
+	mailbox    bool
+	registered bool
+}
+
+func sessionStatusKey(agent, name string) string { return agent + "\x00" + name }
+
+func printSessionTable(stdout io.Writer, sessions []sessionRow) {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "AGENT\tSESSION ID\tCWD\tLABEL\tLAST ACTIVITY\tSOURCE\tSTATE\tMAILBOX\tREGISTERED")
 	for _, session := range sessions {

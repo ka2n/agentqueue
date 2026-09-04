@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/paths"
+	crosssessions "github.com/ka2n/crossagent/sessions"
 )
 
 func TestCmdSessionsJSONFiltersAndReportsQueueStatus(t *testing.T) {
@@ -21,7 +23,7 @@ func TestCmdSessionsJSONFiltersAndReportsQueueStatus(t *testing.T) {
 		t.Fatalf("get cwd: %v", err)
 	}
 	id := "01cli-session"
-	path := filepath.Join(piDir, "sessions", agentqueue.EncodePiCWD(cwd), "2026-09-04T10-00-00-000Z_"+id+".jsonl")
+	path := filepath.Join(piDir, "sessions", paths.EncodePiCWD(cwd), "2026-09-04T10-00-00-000Z_"+id+".jsonl")
 	body := `{"type":"session","version":3,"id":"` + id + `","timestamp":"2026-09-04T10:00:00.000Z","cwd":"` + cwd + `"}
 `
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -48,7 +50,7 @@ func TestCmdSessionsJSONFiltersAndReportsQueueStatus(t *testing.T) {
 	if err := cmdSessions(context.Background(), []string{"--agent", "pi", "--cwd", ".", "--json"}, &out); err != nil {
 		t.Fatalf("cmdSessions: %v", err)
 	}
-	var sessions []agentqueue.Session
+	var sessions []sessionRow
 	if err := json.Unmarshal(out.Bytes(), &sessions); err != nil {
 		t.Fatalf("parse JSON output: %v\n%s", err, out.String())
 	}
@@ -58,7 +60,7 @@ func TestCmdSessionsJSONFiltersAndReportsQueueStatus(t *testing.T) {
 	if sessions[0].SessionID != id || !sessions[0].Mailbox || !sessions[0].Registered {
 		t.Fatalf("session row = %#v, want id with both queue flags", sessions[0])
 	}
-	if sessions[0].Source != "pi-session" || sessions[0].State != "" {
+	if sessions[0].Source != crosssessions.SourcePiSession || sessions[0].State != "" {
 		t.Fatalf("source/state = %q/%q, want pi-session/empty", sessions[0].Source, sessions[0].State)
 	}
 }
@@ -69,7 +71,7 @@ func TestCmdSessionsHumanTableAndLimit(t *testing.T) {
 	piDir := filepath.Join(home, ".pi", "agent")
 	cwd := filepath.Join(home, "project")
 	for i, id := range []string{"one", "two"} {
-		path := filepath.Join(piDir, "sessions", agentqueue.EncodePiCWD(cwd), "2026-09-04T10-00-0"+string(rune('0'+i))+"-000Z_"+id+".jsonl")
+		path := filepath.Join(piDir, "sessions", paths.EncodePiCWD(cwd), "2026-09-04T10-00-0"+string(rune('0'+i))+"-000Z_"+id+".jsonl")
 		body := `{"type":"session","id":"` + id + `","timestamp":"2026-09-04T10:00:00.000Z","cwd":"` + cwd + `"}
 `
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

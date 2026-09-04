@@ -76,9 +76,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "sessions":
 		err = cmdSessions(ctx, args[1:], stdout)
 	case "install":
-		err = cmdInstall(args[1:], stdin, stdout, stderr)
+		err = cmdInstall(ctx, args[1:], stdin, stdout, stderr)
 	case "uninstall":
-		err = cmdUninstall(args[1:], stdin, stdout)
+		err = cmdUninstall(ctx, args[1:], stdin, stdout)
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand %q\n\n", args[0])
 		usage(stderr)
