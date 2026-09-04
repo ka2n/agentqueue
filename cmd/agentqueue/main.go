@@ -81,7 +81,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "uninstall":
 		err = cmdUninstall(ctx, args[1:], stdin, stdout)
 	default:
-		fmt.Fprintf(stderr, "unknown subcommand %q\n\n", args[0])
+		fmt.Fprintf(stderr, "agentqueue: unknown subcommand %q\n\n", args[0])
 		usage(stderr)
 		return exitUsage
 	}
@@ -439,7 +439,7 @@ func cmdWait(ctx context.Context, args []string, stdout, stderr io.Writer) (int,
 	if err != nil {
 		if errors.Is(err, agentqueue.ErrTimeout) {
 			// A clean timeout gets its own exit code, not the generic failure.
-			fmt.Fprintf(stderr, "timeout: no message for %s within %ds\n", target, *timeout)
+			fmt.Fprintf(stderr, "agentqueue: timeout: no message for %s within %ds\n", target, *timeout)
 			return exitTimeout, nil
 		}
 		return exitError, err

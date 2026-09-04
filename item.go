@@ -25,13 +25,13 @@ import (
 // Sentinel errors returned by the queue.
 var (
 	// ErrEmpty means there was no pending item to claim.
-	ErrEmpty = errors.New("agentqueue: queue is empty")
+	ErrEmpty = errors.New("queue is empty")
 	// ErrTimeout means Wait reached its deadline without an item arriving.
-	ErrTimeout = errors.New("agentqueue: timeout waiting for item")
+	ErrTimeout = errors.New("timeout waiting for item")
 	// ErrNotFound means the requested item id does not exist in the queue.
-	ErrNotFound = errors.New("agentqueue: item not found")
+	ErrNotFound = errors.New("item not found")
 	// ErrInvalidTarget means a target string or its agent/name parts are unusable.
-	ErrInvalidTarget = errors.New("agentqueue: invalid target")
+	ErrInvalidTarget = errors.New("invalid target")
 )
 
 // defaultAgent is the agent assumed when a target string carries no "agent:" prefix.
@@ -104,7 +104,7 @@ func ParseState(s string) (State, error) {
 	case "done":
 		return StateDone, nil
 	default:
-		return 0, fmt.Errorf("agentqueue: unknown state %q", s)
+		return 0, fmt.Errorf("unknown state %q", s)
 	}
 }
 

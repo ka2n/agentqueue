@@ -71,7 +71,7 @@ func defaultFetchCmd(t Target) string {
 // Open prepares root as a queue directory, creating it if needed.
 func Open(root string, opts ...Option) (*Queue, error) {
 	if strings.TrimSpace(root) == "" {
-		return nil, errors.New("agentqueue: empty queue root")
+		return nil, errors.New("empty queue root")
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {

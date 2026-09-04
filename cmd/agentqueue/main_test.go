@@ -238,6 +238,17 @@ func TestRunPushUnknownAgentReportsMissingTransport(t *testing.T) {
 	}
 }
 
+func TestRunTakeUnknownIDHasOneCLIPrefix(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), []string{"take", "--root", t.TempDir(), "--to", "claude:s", "missing"}, strings.NewReader(""), &out, &errOut)
+	if code != exitError {
+		t.Fatalf("take exit = %d, want %d", code, exitError)
+	}
+	if got, want := errOut.String(), "agentqueue: no pending message missing for claude:s\n"; got != want {
+		t.Fatalf("take stderr = %q, want %q", got, want)
+	}
+}
+
 func TestRunCustomMailboxCommandsDoNotRequireTransport(t *testing.T) {
 	root := t.TempDir()
 	target := agentqueue.Target{Agent: "custom", Name: "x"}
@@ -321,8 +332,8 @@ func TestRunWaitTimeoutExitCode(t *testing.T) {
 	if code != exitTimeout {
 		t.Fatalf("wait exit = %d, want %d", code, exitTimeout)
 	}
-	if !strings.Contains(errOut.String(), "timeout") {
-		t.Fatalf("wait stderr = %q, want a timeout notice", errOut.String())
+	if got, want := errOut.String(), "agentqueue: timeout: no message for claude:nobody within 1s\n"; got != want {
+		t.Fatalf("wait stderr = %q, want %q", got, want)
 	}
 }
 
@@ -350,8 +361,8 @@ func TestRunUnknownSubcommand(t *testing.T) {
 	if code != exitUsage {
 		t.Fatalf("exit = %d, want %d", code, exitUsage)
 	}
-	if !strings.Contains(errOut.String(), "unknown subcommand") {
-		t.Fatalf("stderr = %q", errOut.String())
+	if !strings.HasPrefix(errOut.String(), "agentqueue: unknown subcommand ") {
+		t.Fatalf("stderr = %q, want one CLI prefix", errOut.String())
 	}
 	if !strings.Contains(errOut.String(), "Commands:") {
 		t.Fatalf("stderr %q does not include usage", errOut.String())

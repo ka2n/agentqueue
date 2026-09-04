@@ -45,6 +45,26 @@ func TestParseTarget(t *testing.T) {
 	}
 }
 
+func TestLibraryErrorsHaveNoProgramPrefix(t *testing.T) {
+	for name, err := range map[string]error{
+		"ErrEmpty":         ErrEmpty,
+		"ErrTimeout":       ErrTimeout,
+		"ErrNotFound":      ErrNotFound,
+		"ErrInvalidTarget": ErrInvalidTarget,
+		"ErrNotify":        ErrNotify,
+	} {
+		if strings.HasPrefix(err.Error(), "agentqueue: ") {
+			t.Fatalf("%s = %q, library errors must not name the CLI", name, err)
+		}
+	}
+	if err := func() error { _, err := ParseState("unknown"); return err }(); strings.HasPrefix(err.Error(), "agentqueue: ") {
+		t.Fatalf("ParseState error = %q, library errors must not name the CLI", err)
+	}
+	if _, err := Open(""); strings.HasPrefix(err.Error(), "agentqueue: ") {
+		t.Fatalf("Open error = %q, library errors must not name the CLI", err)
+	}
+}
+
 func TestTargetString(t *testing.T) {
 	got := Target{Agent: "codex", Name: "abc"}.String()
 	if got != "codex:abc" {

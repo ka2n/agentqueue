@@ -9,7 +9,7 @@ import (
 )
 
 // ErrNotify means the item was persisted but its arrival notice failed.
-var ErrNotify = errors.New("agentqueue: notify failed")
+var ErrNotify = errors.New("notify failed")
 
 // Notice is the arrival notification for a queued item.
 //
