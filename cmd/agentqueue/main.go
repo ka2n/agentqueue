@@ -111,9 +111,10 @@ Usage:
   agentqueue <command> [flags]
 
 Commands:
-  push   Enqueue a message for an agent session and notify it.
+  push   Enqueue a message for an agent session and notify it when supported.
            agentqueue push --to claude:reviewer "please review PR 42"
            agentqueue push --to codex:1f0a-thread -   # body from stdin
+           agentqueue push --to pi:<session-id> "please inspect this"
   wait   Block until a message arrives. Run this in the background from a
          claude session; the command exits on arrival, which resumes your turn.
            agentqueue wait --to claude:reviewer --timeout 3600 --take
@@ -127,7 +128,8 @@ Commands:
 Setup and session commands:
   install     Detect the agents you have and set up their integration. For
               claude that means hook entries in a settings file; codex needs
-              none. Confirms before writing; --dry-run and --print show the
+              none; pi uses extensions/pi/agentqueue.ts. Confirms before
+              writing; --dry-run and --print show the
               exact JSON block instead. Use --skip-self-check only when the
               command is known to be an older or wrapped binary.
                 agentqueue install --agent claude --scope user
@@ -163,7 +165,9 @@ is claimed as it is delivered, so no message arrives twice. A claude session
 can also pull, by running "agentqueue wait" as a background command and
 resuming when it exits; that needs no hooks. A codex session is pushed an
 arrival notice on enqueue; the notice carries no message body, only the id and
-the command that fetches it.
+the command that fetches it. A pi session uses the in-process extension in
+extensions/pi/agentqueue.ts, which watches its pending directory and claims
+messages through this CLI before injecting them.
 `)
 }
 

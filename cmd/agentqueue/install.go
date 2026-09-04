@@ -852,6 +852,8 @@ func printAgentTable(stdout io.Writer, infos []agentInfo, path, invocation strin
 			fmt.Fprintf(stdout, "%s hooks are written to %s\n", info.Name, path)
 		case info.setup == setupNone:
 			fmt.Fprintf(stdout, "%s needs no configuration, so no file is written for it\n", info.Name)
+		case info.setup == setupExtension:
+			fmt.Fprintf(stdout, "%s uses the in-process extension; copy extensions/pi/agentqueue.ts as described in its README (no file is written here)\n", info.Name)
 		default:
 			fmt.Fprintf(stdout, "%s has no integration in this release, so no file is written for it\n", info.Name)
 		}
@@ -904,8 +906,8 @@ func installAgent(info agentInfo, path, invocation, check string, yes, dryRun, d
 	case setupNone:
 		fmt.Fprintf(stdout, "%s: already supported through `codex queue`, no setup needed\n", info.Name)
 		return nil
-	case setupUnsupported:
-		fmt.Fprintf(stdout, "%s: not supported yet (its integration would be a JS extension, which this release does not ship); nothing written\n", info.Name)
+	case setupExtension:
+		fmt.Fprintf(stdout, "%s: use the in-process extension from extensions/pi/README.md; nothing written\n", info.Name)
 		return nil
 	}
 	return installClaudeHooks(path, invocation, check, yes, dryRun, diffOnly, stdin, stdout)

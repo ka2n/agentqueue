@@ -114,7 +114,7 @@ func TestDetectAgentsCoversEveryKnownAgent(t *testing.T) {
 		t.Fatal("codex needs no setup, so install must write nothing for it")
 	}
 	if infos[2].installable() {
-		t.Fatal("pi has no integration yet, so install must write nothing for it")
+		t.Fatal("pi's extension is installed separately, so install must write nothing for it")
 	}
 	if got := infos[2].versionLabel(); got != "-" {
 		t.Fatalf("versionLabel for a missing agent = %q, want -", got)
@@ -135,7 +135,7 @@ func TestSetupState(t *testing.T) {
 		{info: infos[0], installed: false, want: "hooks not installed"},
 		{info: infos[0], installed: true, want: "hooks installed"},
 		{info: infos[1], want: "no setup needed"},
-		{info: infos[2], want: "not supported yet"},
+		{info: infos[2], want: "install extension manually"},
 		{info: agentInfo{Name: "claude"}, want: "not found on $PATH"},
 	}
 	for _, tt := range tests {

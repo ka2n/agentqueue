@@ -13,7 +13,7 @@ import (
 )
 
 func TestLookupRegisteredTransports(t *testing.T) {
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range []string{"claude", "codex", "pi"} {
 		tr, ok := Lookup(agent)
 		if !ok {
 			t.Fatalf("Lookup(%q) not registered", agent)
@@ -32,6 +32,21 @@ func TestClaudeTransportNotifyIsNoop(t *testing.T) {
 	notice := Notice{Target: Target{Agent: "claude", Name: "s"}, ItemID: "id", Pending: 1, FetchCmd: "agentqueue take"}
 	if err := tr.Notify(context.Background(), notice); err != nil {
 		t.Fatalf("Notify: %v", err)
+	}
+}
+
+func TestPushAndNotifyPiLeavesItemForExtension(t *testing.T) {
+	q, root := mustOpen(t)
+	target := Target{Agent: "pi", Name: "session-1"}
+	item, err := q.PushAndNotify(context.Background(), target, "body text", nil)
+	if err != nil {
+		t.Fatalf("PushAndNotify: %v", err)
+	}
+	if item == nil {
+		t.Fatal("PushAndNotify returned a nil item")
+	}
+	if _, err := os.Stat(filepath.Join(root, "pi", "session-1", "pending", item.ID+".json")); err != nil {
+		t.Fatalf("item not pending: %v", err)
 	}
 }
 

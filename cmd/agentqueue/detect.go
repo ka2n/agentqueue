@@ -29,8 +29,9 @@ const (
 	setupHooks setupKind = iota
 	// setupNone means the agent already works with no configuration.
 	setupNone
-	// setupUnsupported means no integration ships for this agent yet.
-	setupUnsupported
+	// setupExtension means the integration is shipped as an extension that
+	// this command cannot install into the agent's global configuration.
+	setupExtension
 )
 
 // detectors lists the agents in the order the install table prints them.
@@ -50,8 +51,8 @@ var detectors = []detector{
 	{
 		name:        "pi",
 		versionArgs: []string{"--version"},
-		delivery:    "in-process extension (planned)",
-		setup:       setupUnsupported,
+		delivery:    "in-process extension (queue watcher)",
+		setup:       setupExtension,
 	},
 }
 
@@ -142,8 +143,8 @@ func setupState(info agentInfo, installed bool) string {
 	switch info.setup {
 	case setupNone:
 		return "no setup needed"
-	case setupUnsupported:
-		return "not supported yet"
+	case setupExtension:
+		return "install extension manually"
 	default:
 		if installed {
 			return "hooks installed"
