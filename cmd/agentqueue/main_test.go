@@ -292,6 +292,44 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
+func TestSubcommandHelp(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "push", args: []string{"push", "-h"}, want: []string{"Usage:", "meta", "root", "to"}},
+		{name: "wait", args: []string{"wait", "-h"}, want: []string{"Usage:", "timeout", "take", "Exit 0"}},
+		{name: "list", args: []string{"list", "-h"}, want: []string{"Usage:", "state", "claimed"}},
+		{name: "take", args: []string{"take", "-h"}, want: []string{"Usage:", "--next", "message ID"}},
+		{name: "ack", args: []string{"ack", "-h"}, want: []string{"Usage:", "claimed", "message ID"}},
+		{name: "targets", args: []string{"targets", "-h"}, want: []string{"Usage:", "mailboxes", "json"}},
+		{name: "sessions", args: []string{"sessions", "-h"}, want: []string{"Usage:", "SOURCE", "STATE", "/proc"}},
+		{name: "register", args: []string{"register", "-h"}, want: []string{"Usage:", "session", "quiet", "json"}},
+		{name: "unregister", args: []string{"unregister", "-h"}, want: []string{"Usage:", "Remove", "quiet"}},
+		{name: "hook claude", args: []string{"hook", "claude", "-h"}, want: []string{"Usage:", "synchronous", "max", "no-block"}},
+		{name: "hook parent", args: []string{"hook", "-h"}, want: []string{"Usage:", "Claude Code", "root"}},
+		{name: "install", args: []string{"install", "-h"}, want: []string{"Usage:", "safety-checked", "skip-self-check", "settings"}},
+		{name: "uninstall", args: []string{"uninstall", "-h"}, want: []string{"Usage:", "only Claude", "dry-run", "diff"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if code := run(context.Background(), tt.args, strings.NewReader(""), &out, &errOut); code != exitUsage {
+				t.Fatalf("help exit = %d, want %d (stdout: %s; stderr: %s)", code, exitUsage, out.String(), errOut.String())
+			}
+			if errOut.Len() != 0 {
+				t.Fatalf("help stderr = %q, want empty", errOut.String())
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("help output %q does not contain %q", out.String(), want)
+				}
+			}
+		})
+	}
+}
+
 func TestRunTakeArgumentErrors(t *testing.T) {
 	root := t.TempDir()
 	tests := [][]string{

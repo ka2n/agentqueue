@@ -745,18 +745,21 @@ func isTTY(r io.Reader) bool {
 func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	var (
 		fs        = newFlagSet("install")
-		agent     = fs.String("agent", "", "set up just this agent, skipping the prompt")
+		agent     = fs.String("agent", "", "set up only this agent (otherwise choose interactively when possible)")
 		scope     = fs.String("scope", scopeUser, "which config to write: user, project or local")
 		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
 		command   = fs.String("command", "", "how to spell the agentqueue binary in a hook command")
 		yes       = fs.Bool("yes", false, "do not ask for confirmation")
-		dryRun    = fs.Bool("dry-run", false, "print what would be added and exit without writing")
+		dryRun    = fs.Bool("dry-run", false, "print the plan and exit without writing")
 		diffOnly  = fs.Bool("diff", false, "print the diff of the settings file and exit without writing or asking")
 		printer   = fs.Bool("print", false, "print the hooks block to paste in by hand and exit")
-		skipCheck = fs.Bool("skip-self-check", false, "skip verifying the hook command before writing")
+		skipCheck = fs.Bool("skip-self-check", false, "skip the pre-write probe of the hook command")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]",
+		"Install the supported integration with a safety-checked, additive settings diff. Claude gets synchronous hooks; Codex needs no setup; Pi uses the extension in extensions/pi/agentqueue.ts. Without --agent, detect available agents and choose interactively when possible. The prospective change is checked to contain only agentqueue additions before any write, and the exact hook command is probed unless --skip-self-check is set. Refusals and other failures exit 1.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue install [--agent claude] [--scope user|project|local] [--settings FILE] [--command PATH] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
+		return fmt.Errorf("%w\nusage: agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
 	}
 
 	invocation, err := resolveHookCommand(*command, currentExe(), realBinEnv().look)
@@ -1047,13 +1050,16 @@ func cmdUninstall(args []string, stdin io.Reader, stdout io.Writer) error {
 		agent    = fs.String("agent", "claude", "agent whose integration to remove")
 		scope    = fs.String("scope", scopeUser, "which config to write: user, project or local")
 		settings = fs.String("settings", "", "settings file to write, overriding --scope")
-		command  = fs.String("command", "", "how the agentqueue binary is spelled in the installed hooks")
+		command  = fs.String("command", "", "hook command invocation used to identify installed entries")
 		yes      = fs.Bool("yes", false, "do not ask for confirmation")
 		dryRun   = fs.Bool("dry-run", false, "print what would be removed and exit without writing")
 		diffOnly = fs.Bool("diff", false, "print the diff of the settings file and exit without writing or asking")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]",
+		"Remove only Claude hook entries previously installed by agentqueue. Other settings and other tools' hooks are preserved. With --agent other than claude, the command reports that nothing is managed. Refusals and other failures exit 1.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue uninstall [--agent claude] [--scope user|project|local] [--settings FILE] [--yes] [--dry-run] [--diff]", err)
+		return fmt.Errorf("%w\nusage: agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]", err)
 	}
 	if name := strings.TrimSpace(*agent); name != "claude" {
 		fmt.Fprintf(stdout, "%s: nothing was ever written for it, nothing to remove\n", name)

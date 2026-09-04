@@ -98,8 +98,11 @@ func cmdRegister(args []string, stdin io.Reader, stdout io.Writer) error {
 		quiet  = fs.Bool("quiet", false, "print nothing on success")
 		asJSON = fs.Bool("json", false, "print the recorded address as JSON")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]",
+		"Record where a session can be reached. With no --to, read the session id and cwd from a hook payload on stdin or the session environment; --to overrides that payload. Re-registering updates the address. Use --quiet for hook-friendly output.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue register [--agent claude] [--to <agent>:<name>]", err)
+		return fmt.Errorf("%w\nusage: agentqueue register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]", err)
 	}
 
 	in, err := readHookPayload(stdin)
@@ -143,8 +146,11 @@ func cmdUnregister(args []string, stdin io.Reader, stdout io.Writer) error {
 		root  = fs.String("root", "", "queue root directory")
 		quiet = fs.Bool("quiet", false, "print nothing on success")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]",
+		"Remove the recorded address for a session. With no --to, read the session id from a hook payload on stdin or the session environment. Removing a missing address succeeds; use --quiet for hook-friendly output.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue unregister [--agent claude] [--to <agent>:<name>]", err)
+		return fmt.Errorf("%w\nusage: agentqueue unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]", err)
 	}
 
 	in, err := readHookPayload(stdin)

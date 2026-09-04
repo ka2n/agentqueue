@@ -19,8 +19,11 @@ func cmdTargets(args []string, stdout io.Writer) error {
 		root   = fs.String("root", "", "queue root directory")
 		asJSON = fs.Bool("json", false, "print JSON instead of a table")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue targets [--agent AGENT] [--root DIR] [--json]",
+		"List queue mailboxes and their pending, claimed and done counts. A mailbox or recorded address is storage metadata, not proof that a session is currently running.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue targets [--agent claude] [--json]", err)
+		return fmt.Errorf("%w\nusage: agentqueue targets [--agent AGENT] [--root DIR] [--json]", err)
 	}
 
 	q, err := openQueue(*root)

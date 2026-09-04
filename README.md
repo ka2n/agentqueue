@@ -24,7 +24,7 @@ running session:
 | --- | --- | --- |
 | `claude` | push, at the next boundary | Hooks installed by `agentqueue install` claim what is pending and inject it at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
 | `codex` | push | `codex queue --thread <name> --message <notice>` injects an arrival notice into the running thread. No setup needed. |
-| `pi` | planned | A pi extension watches the queue directory and injects the notice in-process. Not shipped in this release. |
+| `pi` | push | Supported by the [Pi extension](extensions/pi/README.md), which watches the queue and injects with `pi.sendMessage(..., { triggerTurn: true })`. It claims each item through `agentqueue take`, so delivery stays exactly-once. |
 | anything else | — | Write a `Transport` (see below). |
 
 ### pi
@@ -34,17 +34,15 @@ background-bash equivalent, so the pull model does not apply, and there is no
 external CLI or socket to inject into a running interactive session. Its
 maintainer resolved that request — issue #145, "Add in-agent-loop event
 messaging" — by adding *in-process* injection instead: an extension calls
-`pi.sendMessage(..., { triggerTurn: true })`, which starts a new agent loop. So
-the supported path for pi is a small pi extension that watches the queue
-directory and injects an arrival notice, following pi's own official example
-`examples/extensions/file-trigger.ts` ("Watches a trigger file and injects its
-contents into the conversation. Useful for external systems to send messages to
-the agent."). pi exposes `PI_SESSION_ID` to its bash tool, so the target name
-can be the pi session id.
+`pi.sendMessage(..., { triggerTurn: true })`, which starts a new agent loop.
 
-That extension is **not included in this release** — it is planned. It needs no
-Go-side `Transport` either: the pending directory is the whole interface the
-extension has to read.
+The shipped [extension](extensions/pi/agentqueue.ts) watches the current
+session's `pending/` directory, claims each item through `agentqueue take`, and
+then injects it with `pi.sendMessage`. Claiming before injection makes delivery
+exactly-once even if another consumer is watching the same mailbox. Install it
+as described in [extensions/pi/README.md](extensions/pi/README.md); the
+extension uses `PI_SESSION_ID` as the target name and needs no Go-side
+`Transport`.
 
 ## Install
 
@@ -62,7 +60,8 @@ agentqueue install
 It prints what it found - which agents are on your `$PATH`, how a message
 reaches each one, where each one's config would be written, and what is left to
 configure - and asks which to set up. Claude Code needs hooks; Codex needs
-nothing.
+nothing; Pi uses the extension described in
+[extensions/pi/README.md](extensions/pi/README.md) and writes no agent config.
 
 ## Claude Code (hook delivery)
 
@@ -106,10 +105,16 @@ rename, so an interrupt or a full disk part-way through leaves your
 own mode - a config you chmodded to `0600` does not come back
 world-readable.
 
-`--yes` skips the question, `--diff` prints the diff and exits without writing
-or asking, `--dry-run` prints the whole plan and stops, and `--print` emits
-just the hooks block to paste in yourself. Installing is idempotent: re-running
-it is a no-op. `agentqueue uninstall` removes only the entries it added.
+`--scope user|project|local` selects the Claude settings file and
+`--settings FILE` overrides that selection. `--command INVOCATION` controls
+how the binary is spelled in the installed hook. `--yes` skips the question,
+`--diff` prints the diff and exits without writing or asking, `--dry-run` prints
+the whole plan and stops, and `--print` emits just the hooks block to paste in
+yourself without inspecting or writing a settings file. By default install
+runs a self-check of the exact command it is about to write; `--skip-self-check`
+opts out only for an intentionally older or wrapped binary. Installing is
+idempotent: re-running it is a no-op. `agentqueue uninstall` removes only the
+entries it added.
 
 ### Reinstalling after the binary moves
 
@@ -222,7 +227,8 @@ are the supported path, which is what `install` configures.
 ## Session discovery
 
 `agentqueue sessions` lists where sessions are recorded so a producer can find a
-useful target:
+useful target. It reads each agent's own storage and uses its CLI where
+available; it does not infer a session location from process information:
 
 ```sh
 agentqueue sessions
@@ -230,12 +236,15 @@ agentqueue sessions --agent claude --cwd /path/to/project --limit 10
 ```
 
 The output includes each session's id, working directory, label, last activity,
-queue status, and a `SOURCE` column. Claude rows are the union of
-`claude agents --json` and a recent transcript scan; transcript records are
-always considered because the CLI does not enumerate every interactive session.
-The transcript's own `cwd` and session id are used rather than decoding its
-lossy project-directory name. Claude transcript scanning defaults to the last
-seven days and can be adjusted with `--max-age 168h`.
+queue status, and a `SOURCE` column naming where the row was found. Claude rows
+are the union of `claude agents --json` and a recent transcript scan; transcript
+records are always considered because the CLI does not enumerate every
+interactive session. In fact, `claude agents --json` reported exactly one
+background session on a machine that had several live interactive sessions —
+the reason the transcript scan always runs alongside it. The transcript's own
+`cwd` and session id are used rather than decoding its lossy project-directory
+name. Claude transcript scanning defaults to the last seven days and can be
+adjusted with `--max-age 168h`.
 
 This command reports location metadata, not process identity. A discovered row
 is not proof that the session is currently running. `STATE` is passed through
@@ -314,30 +323,37 @@ the body has been shown to a session that does not own it.
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| `push --to <target> [TEXT\|-]` | Enqueue a message and notify the agent. `-` or no text reads the body from stdin. `--meta k=v` is repeatable. |
-| `list --to <target> [--state pending\|claimed\|done]` | List what a mailbox holds. |
-| `take --to <target> [--next \| ID]` | Claim a message and print it, so no other consumer receives it. |
-| `ack --to <target> ID` | Mark a message done. |
-| `wait --to <target> [--timeout 3600] [--take]` | Block until a message arrives. For the background-wait method. |
-| `install [--agent claude] [--scope user\|project\|local]` | Detect the agents present and set up their integration. Shows a unified diff of the settings file and refuses to write anything that is not the original plus agentqueue's own entries. `--settings FILE` writes to a specific file, `--command PATH` sets how the binary is spelled in a hook, `--yes`, `--diff`, `--dry-run` and `--print` control confirmation. |
-| `uninstall [--agent claude]` | Remove the hooks `install` added, and only those; `--diff`, `--dry-run` and `--yes` as above. |
-| `hook claude` | Serve a Claude Code hook: read the payload on stdin, claim what is pending, inject it. `--max`, `--log`, `--to`, `--no-block`. Installed by `install`; not run by hand. |
-| `register` / `unregister` | Record or drop where a session can be reached. Reads the hook payload on stdin when there is one, otherwise the environment. |
-| `targets [--agent A] [--json]` | List the mailboxes under the queue root: counts, whether an address is registered, cwd, last update. |
+These are the commands shipped by the CLI. Run `agentqueue <command> -h` for
+syntax and examples without consulting this document.
 
-Every command takes `--root <dir>`; the root is resolved from `--root`,
-`$AGENTQUEUE_ROOT`, `$XDG_STATE_HOME/agentqueue`, then
-`~/.local/state/agentqueue`.
+| Command and flags | What it does |
+| --- | --- |
+| `push --to <agent>:<name> [--root DIR] [--meta KEY=VALUE]... [TEXT\|-]` | Enqueue a message and notify the target when supported. `-` or no text reads the body from stdin; repeated `--meta` flags attach metadata. Exit 0 when queued, 1 on an error (including notification failure; the item remains queued), 2 for invalid usage. |
+| `wait --to <agent>:<name> [--root DIR] [--timeout SECONDS] [--take] [--json]` | Wait for a pending message. `--take` claims and prints the oldest one; without it, all pending bodies are reported without claiming. `--timeout` defaults to 3600 seconds and `0` waits forever. Exit 3 when the timeout expires. |
+| `list --to <agent>:<name> [--root DIR] [--state pending\|claimed\|done] [--json]` | List one mailbox state, defaulting to `pending`, without changing messages. |
+| `take --to <agent>:<name> [--root DIR] [--json] (--next \| ID)` | Claim exactly one pending message, either the oldest with `--next` or the given ID, and print it. |
+| `ack --to <agent>:<name> [--root DIR] ID` | Mark one pending or claimed message done after acting on it. |
+| `targets [--agent AGENT] [--root DIR] [--json]` | List mailboxes and their pending, claimed and done counts, recorded cwd and address status. A mailbox is storage metadata, not proof of a running session. |
+| `sessions [--agent claude\|codex\|pi] [--cwd PATH] [--limit N] [--max-age DURATION] [--json]` | Discover where sessions are recorded. It reports location metadata only; `SOURCE` identifies the backing CLI/storage source and `STATE` is copied only from Claude's CLI, empty otherwise. Claude's transcript scan always runs alongside `claude agents --json`. |
+| `register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]` | Record a session address from an explicit target or a hook payload/environment. `--quiet` suppresses the success line; `--json` prints the stored address. |
+| `unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]` | Remove a recorded session address. Removing a missing address succeeds. |
+| `hook claude [--to <agent>:<name>] [--root DIR] [--max N] [--log FILE] [--no-block]` | Serve Claude Code's synchronous hook protocol: read stdin, claim pending messages and print injection JSON. It always exits 0, even on internal failure, so it cannot disrupt a session. |
+| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude gets hooks, Codex needs no setup, and Pi uses the extension. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
+| `uninstall [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]` | Remove only agentqueue's own Claude hooks, preserving other settings and hooks. `--diff` and `--dry-run` do not write; a refused safety check exits non-zero. |
+
+Queue commands that expose `--root` resolve it from that flag, then
+`$AGENTQUEUE_ROOT`, `$XDG_STATE_HOME/agentqueue`, and
+`~/.local/state/agentqueue`. `sessions` has no `--root` flag and uses the same
+environment/default resolution for queue-status lookups. `install` and
+`uninstall` use `--scope` or `--settings` for Claude's settings file instead.
 
 Exit codes:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success. For `wait`, at least one message arrived. For `hook claude`, always - including when it failed internally, because a hook must not disrupt a session. |
-| `1` | An error occurred. |
-| `2` | A usage problem. |
+| `0` | Success. For `wait`, a message arrived. `hook claude` always returns 0 at runtime, including internal failures. |
+| `1` | An operational error occurred; `install` and `uninstall` also use this for a refused safety check. |
+| `2` | A usage problem or command help. |
 | `3` | `wait` timed out with no message. Not an error. |
 
 ## Storage layout

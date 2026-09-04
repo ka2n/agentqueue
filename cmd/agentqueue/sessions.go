@@ -19,12 +19,15 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 	cwd := fs.String("cwd", "", "restrict results to this working directory")
 	asJSON := fs.Bool("json", false, "print JSON instead of a table")
 	limit := fs.Int("limit", 0, "show at most N sessions (zero means all)")
-	maxAge := fs.Duration("max-age", 7*24*time.Hour, "skip Claude files older than this duration")
+	maxAge := fs.Duration("max-age", 7*24*time.Hour, "skip Claude transcript files older than this duration")
+	setFlagUsage(fs, stdout, args,
+		"agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--limit N] [--max-age DURATION] [--json]",
+		"List where sessions are recorded: id, working directory, label, activity, queue status and SOURCE. This reports location metadata, not process liveness. STATE is copied only from Claude's own CLI when present and is empty otherwise; no state is computed and /proc is never read. Claude's transcript scan always runs alongside claude agents --json because the CLI may omit interactive sessions.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--json] [--limit N] [--max-age DURATION]", err)
+		return fmt.Errorf("%w\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--limit N] [--max-age DURATION] [--json]", err)
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument %q\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--json] [--limit N] [--max-age DURATION]", fs.Arg(0))
+		return fmt.Errorf("unexpected argument %q\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--limit N] [--max-age DURATION] [--json]", fs.Arg(0))
 	}
 	if *limit < 0 {
 		return fmt.Errorf("--limit must not be negative")

@@ -110,43 +110,25 @@ codex:1f0a-thread or claude:reviewer. A bare name means the claude agent, so
 Usage:
   agentqueue <command> [flags]
 
+Run agentqueue <command> -h for that command's flags, input, side effects, and
+exit status.
+
 Commands:
-  push   Enqueue a message for an agent session and notify it when supported.
-           agentqueue push --to claude:reviewer "please review PR 42"
-           agentqueue push --to codex:1f0a-thread -   # body from stdin
-           agentqueue push --to pi:<session-id> "please inspect this"
-  wait   Block until a message arrives. Run this in the background from a
-         claude session; the command exits on arrival, which resumes your turn.
-           agentqueue wait --to claude:reviewer --timeout 3600 --take
-  list   List the messages held for a target in one state.
-           agentqueue list --to claude:reviewer --state pending
-  take   Claim a message and print it, so no other consumer receives it.
-           agentqueue take --to codex:1f0a-thread --next
-  ack    Mark a message done once you have acted on it.
-           agentqueue ack --to codex:1f0a-thread 1756800000000-0a1b2c3d4e5f
+  push        Enqueue a message and notify the target when supported.
+  wait        Wait for a message; optionally claim it for a background agent.
+  list        List one target's messages in pending, claimed or done state.
+  take        Claim one pending message by ID or with --next.
+  ack         Mark one pending or claimed message done.
+  targets     List queue mailboxes, counts and recorded addresses.
+  sessions    Discover where agent sessions are recorded; not process liveness.
+  register    Record an address for a session.
+  unregister  Remove a recorded session address.
+  hook claude Serve the synchronous Claude Code hook protocol.
+  install     Install the Claude hook integration, with a safety-checked diff.
+  uninstall   Remove only the Claude hooks installed by agentqueue.
 
-Setup and session commands:
-  install     Detect the agents you have and set up their integration. For
-              claude that means hook entries in a settings file; codex needs
-              none; pi uses extensions/pi/agentqueue.ts. Confirms before
-              writing; --dry-run and --print show the
-              exact JSON block instead. Use --skip-self-check only when the
-              command is known to be an older or wrapped binary.
-                agentqueue install --agent claude --scope user
-  uninstall   Remove the hooks install added, and only those.
-  hook claude Serve a Claude Code hook: read the payload on stdin, claim what
-              is pending and inject it into the session. Installed by
-              "install"; you do not run this by hand.
-  register    Record where this session can be reached, so a producer can
-              address it by session id or by working directory.
-  unregister  Drop that record.
-  targets     List the mailboxes under the queue root and what they hold.
-  sessions    Discover where Claude, Codex and Pi sessions are recorded.
-              It does not verify that a session is currently running. Use
-              --agent, --cwd, --limit, --max-age and --json to narrow or script it.
-
-Common flags:
-  --to <agent>:<name>   target session (required)
+Common queue flags (where supported; see command help):
+  --to <agent>:<name>   target session
   --root <dir>          queue root directory
   --json                print JSON instead of a human summary
 
@@ -155,8 +137,8 @@ Queue root resolution, in order:
 
 Exit codes:
   0  success (for wait: at least one message arrived)
-  1  an error occurred
-  2  a usage problem
+  1  an error occurred; install also uses this for a refused safety check
+  2  a usage problem or command help
   3  wait timed out with no message (not an error)
 
 Delivery depends on the agent. A claude session is delivered to by hooks: with
@@ -180,6 +162,35 @@ func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
+}
+
+// setFlagUsage connects a command's help to its caller-owned output. The
+// flag package also calls Usage for parse errors, so only an argument list that
+// actually requested help prints it; invalid flags remain uniformly reported
+// by run.
+func setFlagUsage(fs *flag.FlagSet, stdout io.Writer, args []string, commandUsage, description string) {
+	helpRequested := false
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			helpRequested = true
+			break
+		}
+	}
+	description = strings.TrimSpace(description)
+	fs.Usage = func() {
+		if !helpRequested {
+			return
+		}
+		fmt.Fprintf(stdout, "Usage:\n  %s\n\n", commandUsage)
+		if description != "" {
+			fmt.Fprintln(stdout, description)
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprintln(stdout, "Flags:")
+		fs.SetOutput(stdout)
+		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
+	}
 }
 
 // progName is the name of this binary, used in the arrival notice's fetch
@@ -320,8 +331,11 @@ func cmdPush(ctx context.Context, args []string, stdin io.Reader, stdout io.Writ
 		meta metaFlag
 	)
 	fs.Var(&meta, "meta", "metadata as key=value (repeatable)")
+	setFlagUsage(fs, stdout, args,
+		"agentqueue push --to <agent>:<name> [--root DIR] [--meta key=value]... [TEXT|-]",
+		"Enqueue one message. TEXT is joined with spaces; omit it or pass - to read the body from stdin. The message remains queued if agent notification fails, but the command exits 1 for that notification error.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue push --to <agent>:<name> [--meta k=v]... [TEXT]", err)
+		return fmt.Errorf("%w\nusage: agentqueue push --to <agent>:<name> [--root DIR] [--meta key=value]... [TEXT|-]", err)
 	}
 
 	target, err := resolveTarget(*to)
@@ -376,8 +390,11 @@ func cmdWait(ctx context.Context, args []string, stdout, stderr io.Writer) (int,
 		take    = fs.Bool("take", false, "claim the oldest pending message instead of only reporting arrivals")
 		asJSON  = fs.Bool("json", false, "print JSON instead of a human summary")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue wait --to <agent>:<name> [--root DIR] [--timeout SECONDS] [--take] [--json]",
+		"Wait for a pending message. With --take, claim the oldest message and print it; otherwise print all pending bodies without claiming them. Exit 0 when a message arrives, 3 when the timeout expires, and 1 on another error.")
 	if err := fs.Parse(args); err != nil {
-		return exitUsage, fmt.Errorf("%w\nusage: agentqueue wait --to <agent>:<name> [--timeout 3600] [--take] [--json]", err)
+		return exitUsage, fmt.Errorf("%w\nusage: agentqueue wait --to <agent>:<name> [--root DIR] [--timeout SECONDS] [--take] [--json]", err)
 	}
 
 	target, err := resolveTarget(*to)
@@ -442,8 +459,11 @@ func cmdList(args []string, stdout io.Writer) error {
 		state  = fs.String("state", "pending", "state to list: pending, claimed or done")
 		asJSON = fs.Bool("json", false, "print JSON instead of a human summary")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue list --to <agent>:<name> [--root DIR] [--state pending|claimed|done] [--json]",
+		"List messages in one mailbox state. The default state is pending; listing never claims or changes messages.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue list --to <agent>:<name> [--state pending|claimed|done] [--json]", err)
+		return fmt.Errorf("%w\nusage: agentqueue list --to <agent>:<name> [--root DIR] [--state pending|claimed|done] [--json]", err)
 	}
 
 	target, err := resolveTarget(*to)
@@ -485,8 +505,11 @@ func cmdTake(args []string, stdout io.Writer) error {
 		next   = fs.Bool("next", false, "claim the oldest pending message")
 		asJSON = fs.Bool("json", false, "print JSON instead of a human summary")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue take --to <agent>:<name> [--root DIR] [--json] (--next | ID)",
+		"Claim exactly one pending message, either the oldest with --next or the specified message ID, and print it. A claimed item is no longer pending for other consumers.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue take --to <agent>:<name> [--next | ID] [--json]", err)
+		return fmt.Errorf("%w\nusage: agentqueue take --to <agent>:<name> [--root DIR] [--json] (--next | ID)", err)
 	}
 
 	target, err := resolveTarget(*to)
@@ -534,8 +557,11 @@ func cmdAck(args []string, stdout io.Writer) error {
 		to   = fs.String("to", "", "target session as <agent>:<name>")
 		root = fs.String("root", "", "queue root directory")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue ack --to <agent>:<name> [--root DIR] ID",
+		"Mark a pending or claimed message done after the agent has acted on it. The message ID is required; an unknown ID is an error.")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue ack --to <agent>:<name> ID", err)
+		return fmt.Errorf("%w\nusage: agentqueue ack --to <agent>:<name> [--root DIR] ID", err)
 	}
 
 	target, err := resolveTarget(*to)

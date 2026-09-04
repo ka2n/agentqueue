@@ -126,9 +126,12 @@ func cmdHookClaude(args []string, stdin io.Reader, stdout, stderr io.Writer) (in
 		max     = fs.Int("max", defaultHookMax, "deliver at most this many messages per hook run")
 		noBlock = fs.Bool("no-block", false, "never emit decision: block on Stop, only additionalContext")
 	)
+	setFlagUsage(fs, stdout, args,
+		"agentqueue hook claude [--to <agent>:<name>] [--root DIR] [--max N] [--log FILE] [--no-block]",
+		"Serve Claude Code's synchronous hook protocol. Read the JSON hook payload from stdin, claim pending messages for the session, and print the injection JSON to stdout. The hook always exits 0, including internal failures, so it cannot disrupt a session; diagnostics go to stderr and optionally --log. Keep it synchronous because stdout is the delivery protocol.")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return exitUsage, fmt.Errorf("%w\nusage: agentqueue hook claude [--to <agent>:<name>] [--max 5] [--log FILE] [--no-block]", err)
+			return exitUsage, fmt.Errorf("%w\nusage: agentqueue hook claude [--to <agent>:<name>] [--root DIR] [--max N] [--log FILE] [--no-block]", err)
 		}
 		// A misconfigured hook must not break the session either.
 		fmt.Fprintf(stderr, "agentqueue hook: %v\n", err)
@@ -306,6 +309,9 @@ func renderDelivery(t agentqueue.Target, items []agentqueue.Item) string {
 func cmdHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
 		return exitUsage, errors.New("usage: agentqueue hook claude [flags]")
+	}
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		return cmdHookClaude([]string{"-h"}, stdin, stdout, stderr)
 	}
 	switch args[0] {
 	case "claude":
