@@ -2,3 +2,5 @@ github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/ka2n/crossagent v0.0.0-20260904131333-9442180aa37f h1:j3dGAm5C/orUkiiOp752yDiNCBqRpkPE4dZxRwvotnE=
 github.com/ka2n/crossagent v0.0.0-20260904131333-9442180aa37f/go.mod h1:vAG57CMZooQpa111w3EMsw3ftn22zjNZn8cen2yah1A=
+github.com/ka2n/crossagent v0.0.0-20260904164859-37adc9fd0ee5 h1:B541aGHTssLfqEZVFN2SPYcaqAZTyf3chwh0wsLit1E=
+github.com/ka2n/crossagent v0.0.0-20260904164859-37adc9fd0ee5/go.mod h1:vAG57CMZooQpa111w3EMsw3ftn22zjNZn8cen2yah1A=
