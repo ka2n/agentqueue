@@ -126,7 +126,8 @@ Setup and session commands:
   install     Detect the agents you have and set up their integration. For
               claude that means hook entries in a settings file; codex needs
               none. Confirms before writing; --dry-run and --print show the
-              exact JSON block instead.
+              exact JSON block instead. Use --skip-self-check only when the
+              command is known to be an older or wrapped binary.
                 agentqueue install --agent claude --scope user
   uninstall   Remove the hooks install added, and only those.
   hook claude Serve a Claude Code hook: read the payload on stdin, claim what

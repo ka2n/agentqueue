@@ -22,6 +22,11 @@ const (
 	eventSubagentStop     = "SubagentStop"
 )
 
+// selfCheckToken is deliberately stable: install uses it to prove that the
+// command it is about to put into Claude's settings is this version of the
+// binary and that the hook subcommand is available.
+const selfCheckToken = "agentqueue hook claude: self-check ok"
+
 // sourceCompact is the SessionStart source that means context is being rebuilt
 // after compaction rather than a new session beginning.
 const sourceCompact = "compact"
@@ -106,6 +111,13 @@ func (l *hookLogger) Close() {
 // disrupts the user's session, so any internal problem is logged and the
 // command exits 0 with empty stdout.
 func cmdHookClaude(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	// Keep the probe out of the normal flag help: it is an install-time
+	// implementation detail, not a hook mode users need to invoke manually.
+	if len(args) == 1 && args[0] == "--self-check" {
+		fmt.Fprintln(stdout, selfCheckToken)
+		return exitOK, nil
+	}
+
 	var (
 		fs      = newFlagSet("hook claude")
 		to      = fs.String("to", "", "target session as <agent>:<name>, overriding the payload's session_id")

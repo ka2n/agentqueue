@@ -43,9 +43,12 @@ const unrelatedSettings = `{
 // agentqueue path. It must never be the user's actual binary.
 const fakeCommand = "/tmp/agentqueue-test-bin/agentqueue"
 
-// installArgs builds an install invocation that touches only path.
+// installArgs builds an install invocation that touches only path. Existing
+// merge tests use a symbolic command path, so they explicitly exercise the
+// opt-out; probe behavior is covered by tests with real temporary scripts.
 func installArgs(path string, extra ...string) []string {
-	return append([]string{"install", "--agent", "claude", "--settings", path, "--command", fakeCommand}, extra...)
+	args := []string{"install", "--agent", "claude", "--settings", path, "--command", fakeCommand, "--skip-self-check"}
+	return append(args, extra...)
 }
 
 // readSettings decodes a settings file for assertions.
@@ -213,6 +216,133 @@ func TestInstallDryRunWritesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("--dry-run created %s", path)
+	}
+}
+
+func writeProbeScript(t *testing.T, body string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agentqueue")
+	content := "#!/bin/sh\n" + body + "\n"
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatalf("write probe command: %v", err)
+	}
+	return path
+}
+
+func TestHookClaudeSelfCheck(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code, err := cmdHook([]string{"claude", "--self-check"}, strings.NewReader(""), &out, &errOut)
+	if err != nil || code != exitOK {
+		t.Fatalf("self-check = (%d, %v), stderr = %q", code, err, errOut.String())
+	}
+	if got := out.String(); got != selfCheckToken+"\n" {
+		t.Fatalf("self-check output = %q, want %q", got, selfCheckToken+"\n")
+	}
+}
+
+func TestInstallSelfCheckSuccess(t *testing.T) {
+	command := writeProbeScript(t, `
+if [ "$1" = hook ] && [ "$2" = claude ] && [ "$3" = --self-check ]; then
+  printf '%s\n' 'agentqueue hook claude: self-check ok'
+  exit 0
+fi
+exit 1`, 0o755)
+	path := filepath.Join(t.TempDir(), "settings.json")
+	var out, errOut bytes.Buffer
+	args := []string{"install", "--agent", "claude", "--settings", path, "--command", command, "--yes"}
+	if code := run(context.Background(), args, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("install exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "checked: "+command+" hook claude --self-check passed ("+selfCheckToken+")") {
+		t.Fatalf("install output = %q, want the successful probe report", out.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("settings was not written: %v", err)
+	}
+}
+
+func TestInstallSelfCheckRefusesWithoutWriting(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "nonzero", path: "exit 7", want: "probe failed"},
+		{name: "wrong token", path: "printf 'not-agentqueue\\n'", want: "probe printed"},
+		{name: "timeout", path: "while :; do :; done", want: "timed out"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			command := writeProbeScript(t, tt.path, 0o755)
+			settingsPath := filepath.Join(t.TempDir(), "settings.json")
+			seed := []byte(`{"keep":true}` + "\n")
+			if err := os.WriteFile(settingsPath, seed, 0o644); err != nil {
+				t.Fatalf("seed settings: %v", err)
+			}
+			var out, errOut bytes.Buffer
+			args := []string{"install", "--agent", "claude", "--settings", settingsPath, "--command", command, "--yes"}
+			if code := run(context.Background(), args, strings.NewReader(""), &out, &errOut); code != exitError {
+				t.Fatalf("install exit = %d, want %d (stdout: %s; stderr: %s)", code, exitError, out.String(), errOut.String())
+			}
+			for _, want := range []string{command + " hook claude --self-check", tt.want, "Update or reinstall the agentqueue binary"} {
+				if !strings.Contains(errOut.String(), want) {
+					t.Fatalf("stderr = %q, want %q", errOut.String(), want)
+				}
+			}
+			if got, err := os.ReadFile(settingsPath); err != nil {
+				t.Fatalf("read settings: %v", err)
+			} else if string(got) != string(seed) {
+				t.Fatalf("failed probe changed settings from %q to %q", seed, got)
+			}
+		})
+	}
+}
+
+func TestInstallSelfCheckRefusesMissingOrNonExecutableCommand(t *testing.T) {
+	for _, nonExecutable := range []bool{false, true} {
+		name := "missing"
+		if nonExecutable {
+			name = "non-executable"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			command := filepath.Join(dir, "agentqueue")
+			if nonExecutable {
+				if err := os.WriteFile(command, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+					t.Fatalf("write non-executable command: %v", err)
+				}
+			}
+			settingsPath := filepath.Join(dir, "settings.json")
+			var out, errOut bytes.Buffer
+			args := []string{"install", "--agent", "claude", "--settings", settingsPath, "--command", command, "--yes"}
+			if code := run(context.Background(), args, strings.NewReader(""), &out, &errOut); code != exitError {
+				t.Fatalf("install exit = %d, want %d (stdout: %s; stderr: %s)", code, exitError, out.String(), errOut.String())
+			}
+			for _, want := range []string{command + " hook claude --self-check", "Update or reinstall the agentqueue binary"} {
+				if !strings.Contains(errOut.String(), want) {
+					t.Fatalf("stderr = %q, want %q", errOut.String(), want)
+				}
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				t.Fatalf("failed probe wrote settings: %v", err)
+			}
+		})
+	}
+}
+
+func TestInstallSkipSelfCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	command := filepath.Join(t.TempDir(), "does-not-exist")
+	var out, errOut bytes.Buffer
+	args := []string{"install", "--agent", "claude", "--settings", path, "--command", command, "--yes", "--skip-self-check"}
+	if code := run(context.Background(), args, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("install exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "skipped (--skip-self-check)") {
+		t.Fatalf("install output = %q, want the bypass report", out.String())
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("settings was not written with --skip-self-check: %v", err)
 	}
 }
 
@@ -634,7 +764,7 @@ func TestInstallWarnsAboutABarePathCommand(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	var out, errOut bytes.Buffer
 	code := run(context.Background(),
-		[]string{"install", "--agent", "claude", "--settings", path, "--command", "agentqueue", "--diff"},
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", "agentqueue", "--diff", "--skip-self-check"},
 		strings.NewReader(""), &out, &errOut)
 	if code != exitOK {
 		t.Fatalf("install --diff exit = %d (stderr: %s)", code, errOut.String())
@@ -746,7 +876,7 @@ func TestInstallConvergesOnTheCurrentCommandPath(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	code := run(context.Background(),
-		[]string{"install", "--agent", "claude", "--settings", path, "--command", oldCommand, "--yes"},
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", oldCommand, "--yes", "--skip-self-check"},
 		strings.NewReader(""), &out, &errOut)
 	if code != exitOK {
 		t.Fatalf("first install exit = %d (stderr: %s)", code, errOut.String())
@@ -755,7 +885,7 @@ func TestInstallConvergesOnTheCurrentCommandPath(t *testing.T) {
 	// The binary moved. Reinstalling has to rewrite, not skip.
 	out.Reset()
 	code = run(context.Background(),
-		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes"},
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes", "--skip-self-check"},
 		strings.NewReader(""), &out, &errOut)
 	if code != exitOK {
 		t.Fatalf("reinstall exit = %d (stderr: %s)", code, errOut.String())
@@ -802,7 +932,7 @@ func TestInstallConvergesOnTheCurrentCommandPath(t *testing.T) {
 	// rather than rewriting on every run.
 	out.Reset()
 	code = run(context.Background(),
-		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes"},
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes", "--skip-self-check"},
 		strings.NewReader(""), &out, &errOut)
 	if code != exitOK {
 		t.Fatalf("third install exit = %d (stderr: %s)", code, errOut.String())
@@ -842,7 +972,7 @@ func TestInstallUpdateKeepsGroupingAndHandEditedFlags(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := run(context.Background(),
-		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes"},
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes", "--skip-self-check"},
 		strings.NewReader(""), &out, &errOut)
 	if code != exitOK {
 		t.Fatalf("install exit = %d (stderr: %s)", code, errOut.String())
@@ -1029,7 +1159,7 @@ func TestInstallUpdateAcrossTwoWrapperGroups(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := run(context.Background(),
-		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes"},
+		[]string{"install", "--agent", "claude", "--settings", path, "--command", newCommand, "--yes", "--skip-self-check"},
 		strings.NewReader(""), &out, &errOut)
 	if code != exitOK {
 		t.Fatalf("install exit = %d (stderr: %s)", code, errOut.String())

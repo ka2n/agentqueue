@@ -2,16 +2,19 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 )
 
 // eventSessionEnd is where the address registration is torn down. It cannot
@@ -671,6 +674,52 @@ func removeOwnedEntries(settings map[string]any, invocation string) []string {
 
 // --- install ---
 
+const selfCheckTimeout = time.Second
+
+// executableFromInvocation extracts the argv[0] that shellQuote put into the
+// hook command. The installer only emits bare words or single-quoted paths.
+func executableFromInvocation(invocation string) (string, error) {
+	argv0, _ := splitArgv0(strings.TrimSpace(invocation))
+	if argv0 == "" {
+		return "", errors.New("empty hook command")
+	}
+	if strings.HasPrefix(argv0, "'") && strings.HasSuffix(argv0, "'") && len(argv0) >= 2 {
+		argv0 = strings.TrimSuffix(strings.TrimPrefix(argv0, "'"), "'")
+		argv0 = strings.ReplaceAll(argv0, `\'\''`, "'")
+	}
+	if argv0 == "" {
+		return "", errors.New("empty hook executable")
+	}
+	return argv0, nil
+}
+
+// checkHookCommand proves the exact binary that will be written into the
+// settings file can serve the Claude hook protocol. It deliberately runs the
+// binary directly rather than through a shell, so a path with spaces is tested
+// as one executable and shell syntax cannot affect the probe.
+func checkHookCommand(invocation string) (string, error) {
+	executable, err := executableFromInvocation(invocation)
+	if err != nil {
+		return "", fmt.Errorf("refusing to install: ran %s hook claude --self-check; could not resolve the executable: %v. Update or reinstall the agentqueue binary, then try again", invocation, err)
+	}
+	ran := strings.TrimSpace(invocation) + " hook claude --self-check"
+	ctx, cancel := context.WithTimeout(context.Background(), selfCheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "hook", "claude", "--self-check")
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("refusing to install: ran %s; probe timed out after %s. Update or reinstall the agentqueue binary, then try again", ran, selfCheckTimeout)
+	}
+	if err != nil {
+		return "", fmt.Errorf("refusing to install: ran %s; probe failed: %v. Update or reinstall the agentqueue binary, then try again", ran, err)
+	}
+	got := strings.TrimSpace(string(output))
+	if got != selfCheckToken {
+		return "", fmt.Errorf("refusing to install: ran %s; probe printed %q, want %q. Update or reinstall the agentqueue binary, then try again", ran, got, selfCheckToken)
+	}
+	return got, nil
+}
+
 // isTTY reports whether r is an interactive terminal. Without one there is
 // nobody to answer a prompt, so install must not ask.
 //
@@ -695,18 +744,19 @@ func isTTY(r io.Reader) bool {
 
 func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	var (
-		fs       = newFlagSet("install")
-		agent    = fs.String("agent", "", "set up just this agent, skipping the prompt")
-		scope    = fs.String("scope", scopeUser, "which config to write: user, project or local")
-		settings = fs.String("settings", "", "settings file to write, overriding --scope")
-		command  = fs.String("command", "", "how to spell the agentqueue binary in a hook command")
-		yes      = fs.Bool("yes", false, "do not ask for confirmation")
-		dryRun   = fs.Bool("dry-run", false, "print what would be added and exit without writing")
-		diffOnly = fs.Bool("diff", false, "print the diff of the settings file and exit without writing or asking")
-		printer  = fs.Bool("print", false, "print the hooks block to paste in by hand and exit")
+		fs        = newFlagSet("install")
+		agent     = fs.String("agent", "", "set up just this agent, skipping the prompt")
+		scope     = fs.String("scope", scopeUser, "which config to write: user, project or local")
+		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
+		command   = fs.String("command", "", "how to spell the agentqueue binary in a hook command")
+		yes       = fs.Bool("yes", false, "do not ask for confirmation")
+		dryRun    = fs.Bool("dry-run", false, "print what would be added and exit without writing")
+		diffOnly  = fs.Bool("diff", false, "print the diff of the settings file and exit without writing or asking")
+		printer   = fs.Bool("print", false, "print the hooks block to paste in by hand and exit")
+		skipCheck = fs.Bool("skip-self-check", false, "skip verifying the hook command before writing")
 	)
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue install [--agent claude] [--scope user|project|local] [--settings FILE] [--command PATH] [--yes] [--dry-run] [--diff] [--print]", err)
+		return fmt.Errorf("%w\nusage: agentqueue install [--agent claude] [--scope user|project|local] [--settings FILE] [--command PATH] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
 	}
 
 	invocation, err := resolveHookCommand(*command, currentExe(), realBinEnv().look)
@@ -730,7 +780,19 @@ func cmdInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) error 
 		return err
 	}
 	for _, info := range chosen {
-		if err := installAgent(info, path, invocation, *yes, *dryRun, *diffOnly, stdin, stdout, stderr); err != nil {
+		check := ""
+		if info.Found && info.setup == setupHooks {
+			if *skipCheck {
+				check = fmt.Sprintf("%s hook claude --self-check skipped (--skip-self-check)", invocation)
+			} else {
+				result, err := checkHookCommand(invocation)
+				if err != nil {
+					return err
+				}
+				check = fmt.Sprintf("%s hook claude --self-check passed (%s)", invocation, result)
+			}
+		}
+		if err := installAgent(info, path, invocation, check, *yes, *dryRun, *diffOnly, stdin, stdout, stderr); err != nil {
 			return err
 		}
 	}
@@ -833,7 +895,7 @@ func readLine(stdin io.Reader) (string, error) {
 }
 
 // installAgent sets up one agent, or explains why there is nothing to do.
-func installAgent(info agentInfo, path, invocation string, yes, dryRun, diffOnly bool, stdin io.Reader, stdout, stderr io.Writer) error {
+func installAgent(info agentInfo, path, invocation, check string, yes, dryRun, diffOnly bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	if !info.Found {
 		fmt.Fprintf(stdout, "%s: not found on $PATH, nothing to set up\n", info.Name)
 		return nil
@@ -846,7 +908,7 @@ func installAgent(info agentInfo, path, invocation string, yes, dryRun, diffOnly
 		fmt.Fprintf(stdout, "%s: not supported yet (its integration would be a JS extension, which this release does not ship); nothing written\n", info.Name)
 		return nil
 	}
-	return installClaudeHooks(path, invocation, yes, dryRun, diffOnly, stdin, stdout)
+	return installClaudeHooks(path, invocation, check, yes, dryRun, diffOnly, stdin, stdout)
 }
 
 // installClaudeHooks merges the claude hook entries into the settings file.
@@ -855,7 +917,7 @@ func installAgent(info agentInfo, path, invocation string, yes, dryRun, diffOnly
 // the real diff, then write. Nothing reaches the disk before
 // verifyMergeSafe agrees that the change is the original file plus our own
 // entries and nothing else.
-func installClaudeHooks(path, invocation string, yes, dryRun, diffOnly bool, stdin io.Reader, stdout io.Writer) error {
+func installClaudeHooks(path, invocation, check string, yes, dryRun, diffOnly bool, stdin io.Reader, stdout io.Writer) error {
 	before, err := loadSettings(path)
 	if err != nil {
 		return err
@@ -921,6 +983,9 @@ this hook's output, so those entries deliver nothing. Remove the "async" field
 	}
 	fmt.Fprintf(stdout, "  backup:  %s (written before the first change)\n", path+settingsBackupSuffix)
 	printPathWarning(stdout, invocation)
+	if check != "" {
+		fmt.Fprintf(stdout, "  checked: %s\n", check)
+	}
 	if updating {
 		fmt.Fprintln(stdout, "  checked: every entry belonging to anything else survives, nothing outside")
 		fmt.Fprintln(stdout, "           \"hooks\" changes, and every entry that goes or arrives is an")
