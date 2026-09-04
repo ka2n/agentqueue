@@ -219,6 +219,29 @@ this library could do with it.
 Hooks, documented at [code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks),
 are the supported path, which is what `install` configures.
 
+## Session discovery
+
+`agentqueue sessions` lists where sessions are recorded so a producer can find a
+useful target:
+
+```sh
+agentqueue sessions
+agentqueue sessions --agent claude --cwd /path/to/project --limit 10
+```
+
+The output includes each session's id, working directory, label, last activity,
+queue status, and a `SOURCE` column. Claude rows are the union of
+`claude agents --json` and a recent transcript scan; transcript records are
+always considered because the CLI does not enumerate every interactive session.
+The transcript's own `cwd` and session id are used rather than decoding its
+lossy project-directory name. Claude transcript scanning defaults to the last
+seven days and can be adjusted with `--max-age 168h`.
+
+This command reports location metadata, not process identity. A discovered row
+is not proof that the session is currently running. `STATE` is passed through
+from Claude's own CLI when it reports one and is left blank for storage-only
+rows; no process or host-pid probe is performed.
+
 ## Claude Code (background wait, no hooks)
 
 The pull method still works and needs no configuration. The session runs, as a

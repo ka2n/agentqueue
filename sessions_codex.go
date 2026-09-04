@@ -103,6 +103,7 @@ func (l *CodexSessionLister) List(ctx context.Context) ([]Session, error) {
 			Cwd:          meta.Payload.Cwd,
 			Label:        label,
 			LastActivity: lastActivity,
+			Source:       sourceCodexRollout,
 		})
 		return nil
 	})

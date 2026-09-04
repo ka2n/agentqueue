@@ -19,14 +19,18 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 	cwd := fs.String("cwd", "", "restrict results to this working directory")
 	asJSON := fs.Bool("json", false, "print JSON instead of a table")
 	limit := fs.Int("limit", 0, "show at most N sessions (zero means all)")
+	maxAge := fs.Duration("max-age", 7*24*time.Hour, "skip Claude files older than this duration")
 	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("%w\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--json] [--limit N]", err)
+		return fmt.Errorf("%w\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--json] [--limit N] [--max-age DURATION]", err)
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected argument %q\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--json] [--limit N]", fs.Arg(0))
+		return fmt.Errorf("unexpected argument %q\nusage: agentqueue sessions [--agent claude|codex|pi] [--cwd PATH] [--json] [--limit N] [--max-age DURATION]", fs.Arg(0))
 	}
 	if *limit < 0 {
 		return fmt.Errorf("--limit must not be negative")
+	}
+	if *maxAge <= 0 {
+		return fmt.Errorf("--max-age must be positive")
 	}
 
 	var cwdFilter string
@@ -42,7 +46,10 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	listers := agentqueue.NewSessionListers(agentqueue.SessionListerOptions{QueueRoot: root})
+	listers := agentqueue.NewSessionListers(agentqueue.SessionListerOptions{
+		QueueRoot:    root,
+		ClaudeMaxAge: *maxAge,
+	})
 	names := []string{"claude", "codex", "pi"}
 	if value := strings.TrimSpace(*agent); value != "" {
 		if _, ok := listers[value]; !ok {
@@ -77,7 +84,7 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 
 func printSessionTable(stdout io.Writer, sessions []agentqueue.Session) {
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "AGENT\tSESSION ID\tCWD\tLABEL\tLAST ACTIVITY\tMAILBOX\tREGISTERED")
+	fmt.Fprintln(tw, "AGENT\tSESSION ID\tCWD\tLABEL\tLAST ACTIVITY\tSOURCE\tSTATE\tMAILBOX\tREGISTERED")
 	for _, session := range sessions {
 		lastActivity := "-"
 		if !session.LastActivity.IsZero() {
@@ -87,18 +94,24 @@ func printSessionTable(stdout io.Writer, sessions []agentqueue.Session) {
 		if label == "" {
 			label = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		state := session.State
+		if state == "" {
+			state = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			session.Agent,
 			session.SessionID,
 			session.Cwd,
 			label,
 			lastActivity,
+			session.Source,
+			state,
 			yesNo(session.Mailbox),
 			yesNo(session.Registered),
 		)
 	}
 	if len(sessions) == 0 {
-		fmt.Fprintln(tw, "(none)\t\t\t\t\t\t")
+		fmt.Fprintln(tw, "(none)\t\t\t\t\t\t\t\t")
 	}
 	_ = tw.Flush()
 }

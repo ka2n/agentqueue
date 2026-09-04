@@ -3,6 +3,7 @@ package agentqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,7 +82,7 @@ func TestClaudeSessionListerUsesCLIJSON(t *testing.T) {
 			return nil, errors.New("unexpected command")
 		}
 		return []byte(`[
-  {"id":"short","sessionId":"claude-session-1","cwd":"` + cwd + `","startedAt":1788480000123,"name":"review worker"}
+  {"id":"short","sessionId":"claude-session-1","cwd":"` + cwd + `","startedAt":1788480000123,"name":"review worker","state":"busy"}
 ]`), nil
 	}
 	lister := NewClaudeSessionLister(SessionListerOptions{
@@ -101,6 +102,9 @@ func TestClaudeSessionListerUsesCLIJSON(t *testing.T) {
 	if got.SessionID != id || got.Cwd != cwd || got.Label != "review worker" {
 		t.Fatalf("session = %#v, want id/cwd/label", got)
 	}
+	if got.Source != sourceClaudeAgents || got.State != "busy" {
+		t.Fatalf("source/state = %q/%q, want CLI/busy", got.Source, got.State)
+	}
 	if !got.Mailbox || !got.Registered {
 		t.Fatalf("queue status = mailbox %v, registered %v, want both", got.Mailbox, got.Registered)
 	}
@@ -109,7 +113,7 @@ func TestClaudeSessionListerUsesCLIJSON(t *testing.T) {
 	}
 }
 
-func TestClaudeSessionListerFallsBackToTranscripts(t *testing.T) {
+func TestClaudeSessionListerListsTranscriptsWhenCLIUnavailable(t *testing.T) {
 	home := t.TempDir()
 	root := t.TempDir()
 	config := filepath.Join(home, "claude-config")
@@ -131,6 +135,8 @@ func TestClaudeSessionListerFallsBackToTranscripts(t *testing.T) {
 		HomeDir:         home,
 		QueueRoot:       root,
 		ClaudeConfigDir: config,
+		ClaudeMaxAge:    365 * 24 * time.Hour,
+		Now:             func() time.Time { return time.Unix(100, 0) },
 		ClaudeCommand:   "missing-claude",
 		CommandRunner: func(context.Context, string, ...string) ([]byte, error) {
 			return nil, errors.New("command not found")
@@ -151,6 +157,91 @@ func TestClaudeSessionListerFallsBackToTranscripts(t *testing.T) {
 	}
 	if sessions[0].Mailbox || sessions[0].Registered {
 		t.Fatalf("unexpected queue status: %#v", sessions[0])
+	}
+}
+
+func TestClaudeSessionListerUnionsCLIAndTranscripts(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	config := filepath.Join(home, ".claude")
+	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-time.Hour)
+
+	writeRecent := func(path, body string) {
+		writeSessionFixture(t, path, body)
+		setSessionMTime(t, path, recent)
+	}
+
+	sharedID := "shared-session"
+	sharedCwd := "/workspace/from-transcript"
+	sharedProject := filepath.Join(config, "projects", EncodeClaudeCWD(sharedCwd))
+	writeRecent(filepath.Join(sharedProject, "shared.jsonl"), `{"type":"user","cwd":"`+sharedCwd+`","sessionId":"`+sharedID+`"}
+`)
+
+	transcriptOnlyID := "transcript-only"
+	transcriptOnlyCwd := "/workspace/transcript-only"
+	writeRecent(filepath.Join(config, "projects", EncodeClaudeCWD(transcriptOnlyCwd), "transcript-only.jsonl"), `{"type":"user","cwd":"`+transcriptOnlyCwd+`","sessionId":"`+transcriptOnlyID+`"}
+`)
+
+	largeID := "large-transcript"
+	largeCwd := "/workspace/large"
+	largeLine := `{"type":"progress","text":"` + strings.Repeat("x", 1024*1024) + `"}`
+	writeRecent(filepath.Join(config, "projects", EncodeClaudeCWD(largeCwd), "large.jsonl"), largeLine+"\n"+`{"type":"user","cwd":"`+largeCwd+`","sessionId":"`+largeID+`"}
+`)
+
+	oldID := "old-transcript"
+	oldPath := filepath.Join(config, "projects", EncodeClaudeCWD("/workspace/old"), "old.jsonl")
+	writeSessionFixture(t, oldPath, `{"type":"user","cwd":"/workspace/old","sessionId":"`+oldID+`"}
+`)
+	setSessionMTime(t, oldPath, now.Add(-48*time.Hour))
+	writeRecent(filepath.Join(config, "projects", EncodeClaudeCWD("/workspace/junk"), "junk.jsonl"), "not json\n")
+
+	cliJSON := fmt.Sprintf(`[
+  {"id":"short","sessionId":%q,"cwd":"/workspace/from-cli","name":"CLI label","state":"busy","startedAt":%d},
+  {"sessionId":"cli-only","cwd":"/workspace/cli-only","name":"CLI only","state":"blocked","startedAt":%d}
+]`, sharedID, now.Add(-2*time.Hour).UnixMilli(), now.Add(-10*time.Minute).UnixMilli())
+	lister := NewClaudeSessionLister(SessionListerOptions{
+		HomeDir:         home,
+		QueueRoot:       root,
+		ClaudeConfigDir: config,
+		ClaudeMaxAge:    24 * time.Hour,
+		Now:             func() time.Time { return now },
+		CommandRunner: func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(cliJSON), nil
+		},
+	})
+	sessions, err := lister.List(context.Background())
+	if err != nil {
+		t.Fatalf("list Claude sessions: %v", err)
+	}
+	byID := make(map[string]Session, len(sessions))
+	for _, session := range sessions {
+		byID[session.SessionID] = session
+	}
+	if len(byID) != 4 {
+		t.Fatalf("got sessions %#v, want shared, cli-only, transcript-only and large", byID)
+	}
+	if _, ok := byID[oldID]; ok {
+		t.Fatalf("old transcript was not filtered: %#v", byID[oldID])
+	}
+
+	shared := byID[sharedID]
+	if shared.Cwd != sharedCwd || shared.Label != "CLI label" || shared.State != "busy" {
+		t.Fatalf("merged shared row = %#v, want transcript cwd, CLI label/state", shared)
+	}
+	for _, source := range []string{sourceClaudeAgents, sourceClaudeTranscript} {
+		if !strings.Contains(shared.Source, source) {
+			t.Fatalf("merged source %q does not include %q", shared.Source, source)
+		}
+	}
+	if !shared.LastActivity.Equal(recent) {
+		t.Fatalf("merged activity = %s, want transcript mtime", shared.LastActivity)
+	}
+	if transcript := byID[transcriptOnlyID]; transcript.State != "" || transcript.Source != sourceClaudeTranscript {
+		t.Fatalf("transcript-only row = %#v, want transcript with empty state", transcript)
+	}
+	if large := byID[largeID]; large.Cwd != largeCwd {
+		t.Fatalf("large transcript row = %#v, want cwd recovered after large line", large)
 	}
 }
 
@@ -195,6 +286,9 @@ not-json
 	if sessions[0].Label != "new thread" || sessions[1].Label != "old-codex" {
 		t.Fatalf("labels = %q, %q", sessions[0].Label, sessions[1].Label)
 	}
+	if sessions[0].Source != sourceCodexRollout || sessions[0].State != "" {
+		t.Fatalf("source/state = %q/%q, want rollout/empty", sessions[0].Source, sessions[0].State)
+	}
 }
 
 func TestPiSessionListerScansEncodedSessionDirectories(t *testing.T) {
@@ -225,6 +319,9 @@ func TestPiSessionListerScansEncodedSessionDirectories(t *testing.T) {
 	}
 	if sessions[0].SessionID != id || sessions[0].Cwd != cwd || sessions[0].Label != "project.with_under_score" {
 		t.Fatalf("session = %#v", sessions[0])
+	}
+	if sessions[0].Source != sourcePiSession || sessions[0].State != "" {
+		t.Fatalf("source/state = %q/%q, want Pi/empty", sessions[0].Source, sessions[0].State)
 	}
 }
 

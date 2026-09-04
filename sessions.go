@@ -15,14 +15,18 @@ import (
 	"time"
 )
 
-// Session is a discovered agent session. Mailbox and Registered describe the
-// matching target in the agentqueue root, rather than the agent's own storage.
+// Session is a discovered agent session. Source identifies the backing CLI or
+// storage record. State is copied only from Claude's own CLI when that source
+// reports it; storage-derived rows leave it empty. Mailbox and Registered
+// describe the matching target in the agentqueue root.
 type Session struct {
 	Agent        string    `json:"agent"`
 	SessionID    string    `json:"session_id"`
 	Cwd          string    `json:"cwd"`
 	Label        string    `json:"label,omitempty"`
 	LastActivity time.Time `json:"last_activity"`
+	Source       string    `json:"source"`
+	State        string    `json:"state"`
 	Mailbox      bool      `json:"mailbox"`
 	Registered   bool      `json:"registered"`
 }
@@ -42,6 +46,8 @@ type SessionListerOptions struct {
 	CodexHome       string
 	PiAgentDir      string
 	ClaudeCommand   string
+	ClaudeMaxAge    time.Duration
+	Now             func() time.Time
 	CommandRunner   CommandRunner
 }
 
@@ -147,6 +153,29 @@ func (o SessionListerOptions) command(ctx context.Context, name string, args ...
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
+const (
+	defaultClaudeMaxAge = 7 * 24 * time.Hour
+
+	sourceClaudeAgents     = "claude-agents"
+	sourceClaudeTranscript = "claude-transcript"
+	sourceCodexRollout     = "codex-rollout"
+	sourcePiSession        = "pi-session"
+)
+
+func (o SessionListerOptions) claudeMaxAge() time.Duration {
+	if o.ClaudeMaxAge > 0 {
+		return o.ClaudeMaxAge
+	}
+	return defaultClaudeMaxAge
+}
+
+func (o SessionListerOptions) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
 func finishSessions(opts SessionListerOptions, sessions []Session) ([]Session, error) {
 	root, err := opts.queueRoot()
 	if err != nil {
@@ -160,6 +189,9 @@ func finishSessions(opts SessionListerOptions, sessions []Session) ([]Session, e
 		session.Agent = strings.TrimSpace(session.Agent)
 		session.SessionID = strings.TrimSpace(session.SessionID)
 		session.Cwd = filepath.Clean(strings.TrimSpace(session.Cwd))
+		if session.Source == "" {
+			session.Source = "unknown"
+		}
 		if session.Label == "" {
 			session.Label = filepath.Base(session.Cwd)
 		}
@@ -258,5 +290,13 @@ func readFirstLine(path string, decode func([]byte) bool) bool {
 func newLineScanner(file *os.File) *bufio.Scanner {
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	return scanner
+}
+
+// newClaudeLineScanner handles unusually large Claude records without making
+// the lister read an entire transcript into memory.
+func newClaudeLineScanner(file *os.File) *bufio.Scanner {
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	return scanner
 }

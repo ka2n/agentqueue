@@ -58,6 +58,9 @@ func TestCmdSessionsJSONFiltersAndReportsQueueStatus(t *testing.T) {
 	if sessions[0].SessionID != id || !sessions[0].Mailbox || !sessions[0].Registered {
 		t.Fatalf("session row = %#v, want id with both queue flags", sessions[0])
 	}
+	if sessions[0].Source != "pi-session" || sessions[0].State != "" {
+		t.Fatalf("source/state = %q/%q, want pi-session/empty", sessions[0].Source, sessions[0].State)
+	}
 }
 
 func TestCmdSessionsHumanTableAndLimit(t *testing.T) {
@@ -84,7 +87,7 @@ func TestCmdSessionsHumanTableAndLimit(t *testing.T) {
 		t.Fatalf("cmdSessions: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"AGENT", "SESSION ID", "CWD", "LABEL", "LAST ACTIVITY", "MAILBOX", "REGISTERED", "pi"} {
+	for _, want := range []string{"AGENT", "SESSION ID", "CWD", "LABEL", "LAST ACTIVITY", "SOURCE", "STATE", "MAILBOX", "REGISTERED", "pi"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("table output missing %q:\n%s", want, got)
 		}
@@ -98,6 +101,7 @@ func TestCmdSessionsRejectsInvalidArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"--agent", "unknown"},
 		{"--limit", "-1"},
+		{"--max-age", "0"},
 		{"unexpected"},
 	} {
 		if err := cmdSessions(context.Background(), args, &bytes.Buffer{}); err == nil {

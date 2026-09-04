@@ -88,6 +88,7 @@ func (l *PiSessionLister) List(ctx context.Context) ([]Session, error) {
 			Cwd:          header.Cwd,
 			Label:        filepath.Base(filepath.Clean(header.Cwd)),
 			LastActivity: lastActivity,
+			Source:       sourcePiSession,
 		})
 		return nil
 	})

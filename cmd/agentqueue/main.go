@@ -141,8 +141,9 @@ Setup and session commands:
               address it by session id or by working directory.
   unregister  Drop that record.
   targets     List the mailboxes under the queue root and what they hold.
-  sessions    Discover Claude, Codex and Pi sessions from their own storage.
-              Use --agent, --cwd, --limit and --json to narrow or script it.
+  sessions    Discover where Claude, Codex and Pi sessions are recorded.
+              It does not verify that a session is currently running. Use
+              --agent, --cwd, --limit, --max-age and --json to narrow or script it.
 
 Common flags:
   --to <agent>:<name>   target session (required)
