@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/agent"
 	crosshooks "github.com/ka2n/crossagent/hooks"
 )
 
@@ -236,7 +237,11 @@ func hookClaude(to, root string, max int, noBlock bool, stdin io.Reader, getenv 
 // else $CLAUDE_CODE_SESSION_ID. The agent is always claude.
 func hookTarget(to, sessionID string, getenv func(string) string) (agentqueue.Target, error) {
 	if s := strings.TrimSpace(to); s != "" {
-		return agentqueue.ParseTarget(s)
+		target, err := agentqueue.ParseTarget(s)
+		if err != nil {
+			return agentqueue.Target{}, err
+		}
+		return checkTargetAgent(target)
 	}
 	name := strings.TrimSpace(sessionID)
 	if name == "" {
@@ -245,7 +250,7 @@ func hookTarget(to, sessionID string, getenv func(string) string) (agentqueue.Ta
 	if name == "" {
 		return agentqueue.Target{}, errors.New("no --to, session_id or $CLAUDE_CODE_SESSION_ID")
 	}
-	return agentqueue.Target{Agent: "claude", Name: name}, nil
+	return agentqueue.Target{Agent: agent.Claude.String(), Name: name}, nil
 }
 
 // claimUpTo claims at most max pending items, oldest first.
@@ -315,9 +320,9 @@ func cmdHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, err
 		return cmdHookClaude([]string{"-h"}, stdin, stdout, stderr)
 	}
 	switch args[0] {
-	case "claude":
+	case agent.Claude.String():
 		return cmdHookClaude(args[1:], stdin, stdout, stderr)
 	default:
-		return exitUsage, fmt.Errorf("no hook integration for agent %q; only claude has one", args[0])
+		return exitUsage, fmt.Errorf("no hook integration for agent %q; only %s has one", args[0], agent.Claude)
 	}
 }

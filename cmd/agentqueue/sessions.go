@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/agent"
 	"github.com/ka2n/crossagent/paths"
 	crosssessions "github.com/ka2n/crossagent/sessions"
 )
@@ -19,20 +20,20 @@ import (
 // are queue facts, not session-discovery facts, so they are joined here from
 // agentqueue's mailbox directories and addr.json records.
 type sessionRow struct {
-	Agent        string    `json:"agent"`
-	SessionID    string    `json:"session_id"`
-	Cwd          string    `json:"cwd"`
-	Label        string    `json:"label,omitempty"`
-	LastActivity time.Time `json:"last_activity"`
-	Source       string    `json:"source"`
-	State        string    `json:"state"`
-	Mailbox      bool      `json:"mailbox"`
-	Registered   bool      `json:"registered"`
+	Agent        agent.Name `json:"agent"`
+	SessionID    string     `json:"session_id"`
+	Cwd          string     `json:"cwd"`
+	Label        string     `json:"label,omitempty"`
+	LastActivity time.Time  `json:"last_activity"`
+	Source       string     `json:"source"`
+	State        string     `json:"state"`
+	Mailbox      bool       `json:"mailbox"`
+	Registered   bool       `json:"registered"`
 }
 
 func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := newFlagSet("sessions")
-	agent := fs.String("agent", "", "restrict results to claude, codex or pi")
+	agentFlag := fs.String("agent", "", "restrict results to claude, codex or pi")
 	cwd := fs.String("cwd", "", "restrict results to this working directory")
 	asJSON := fs.Bool("json", false, "print JSON instead of a table")
 	limit := fs.Int("limit", 0, "show at most N sessions (zero means all)")
@@ -88,12 +89,13 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 		ClaudeMaxAge: *maxAge,
 	}
 	listers := crosssessions.NewSessionListers(options)
-	names := []string{"claude", "codex", "pi"}
-	if value := strings.ToLower(strings.TrimSpace(*agent)); value != "" {
-		if _, ok := listers[value]; !ok {
-			return fmt.Errorf("unknown agent %q: want claude, codex or pi", value)
+	names := agent.Names()
+	if value := strings.TrimSpace(*agentFlag); value != "" {
+		name, err := parseAgent(value)
+		if err != nil {
+			return err
 		}
-		names = []string{value}
+		names = []agent.Name{name}
 	}
 
 	discovered := make([]crosssessions.Session, 0)
@@ -116,7 +118,7 @@ func cmdSessions(ctx context.Context, args []string, stdout io.Writer) error {
 
 	rows := make([]sessionRow, 0, len(discovered))
 	for _, session := range discovered {
-		state := status[sessionStatusKey(session.Agent, session.SessionID)]
+		state := status[sessionStatusKey(session.Agent.String(), session.SessionID)]
 		rows = append(rows, sessionRow{
 			Agent:        session.Agent,
 			SessionID:    session.SessionID,

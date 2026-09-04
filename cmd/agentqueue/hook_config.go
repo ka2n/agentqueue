@@ -275,14 +275,15 @@ func printDetectedAgents(stdout io.Writer, agents []crossagent.Agent) {
 func chooseInstallAgents(ctx context.Context, requested string, stdin io.Reader, stdout io.Writer, yes, dryRun, diffOnly bool) ([]crossagent.Agent, error) {
 	detector := crossagent.NewDetector()
 	if value := strings.TrimSpace(requested); value != "" {
-		agent, err := detector.DetectOne(ctx, value)
+		name, err := parseAgent(value)
 		if err != nil {
-			if errors.Is(err, crossagent.ErrUnknownAgent) {
-				return nil, err
-			}
+			return nil, err
+		}
+		detected, err := detector.DetectOne(ctx, name)
+		if err != nil {
 			fmt.Fprintf(stdout, "detection warning: %v\n", err)
 		}
-		return []crossagent.Agent{agent}, nil
+		return []crossagent.Agent{detected}, nil
 	}
 
 	agents, detectErr := detector.Detect(ctx)
@@ -321,7 +322,7 @@ func chooseInstallAgents(ctx context.Context, requested string, stdin io.Reader,
 func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ io.Writer) error {
 	var (
 		fs        = newFlagSet("install")
-		agent     = fs.String("agent", "", "set up only this agent")
+		agentFlag = fs.String("agent", "", "set up only this agent")
 		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local")
 		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
 		command   = fs.String("command", "", "how to spell the agentqueue binary in a hook command")
@@ -349,7 +350,7 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 		return printJSON(stdout, hookBlock(claudeHookSpecs(invocation)))
 	}
 
-	chosen, err := chooseInstallAgents(ctx, *agent, stdin, stdout, *yes, *dryRun, *diffOnly)
+	chosen, err := chooseInstallAgents(ctx, *agentFlag, stdin, stdout, *yes, *dryRun, *diffOnly)
 	if err != nil {
 		return err
 	}
@@ -384,14 +385,14 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 
 func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) error {
 	var (
-		fs       = newFlagSet("uninstall")
-		agent    = fs.String("agent", "claude", "agent whose integration to remove")
-		scope    = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local")
-		settings = fs.String("settings", "", "settings file to write, overriding --scope")
-		command  = fs.String("command", "", "hook command invocation used to identify legacy entries")
-		yes      = fs.Bool("yes", false, "do not ask for confirmation")
-		dryRun   = fs.Bool("dry-run", false, "print the plan and exit without writing")
-		diffOnly = fs.Bool("diff", false, "print the plan and diff without writing or asking")
+		fs        = newFlagSet("uninstall")
+		agentFlag = fs.String("agent", string(crosshooks.AgentClaude), "agent whose integration to remove")
+		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local")
+		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
+		command   = fs.String("command", "", "hook command invocation used to identify legacy entries")
+		yes       = fs.Bool("yes", false, "do not ask for confirmation")
+		dryRun    = fs.Bool("dry-run", false, "print the plan and exit without writing")
+		diffOnly  = fs.Bool("diff", false, "print the plan and diff without writing or asking")
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]",
@@ -402,8 +403,12 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if strings.ToLower(strings.TrimSpace(*agent)) != crosshooks.AgentClaude {
-		fmt.Fprintf(stdout, "%s: nothing managed, nothing to remove\n", strings.TrimSpace(*agent))
+	name, err := parseAgent(*agentFlag)
+	if err != nil {
+		return err
+	}
+	if name != crosshooks.AgentClaude {
+		fmt.Fprintf(stdout, "%s: nothing managed, nothing to remove\n", name)
 		return nil
 	}
 

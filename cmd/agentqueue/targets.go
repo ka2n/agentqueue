@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -14,10 +15,10 @@ import (
 // registered it, not because that session is known to be alive.
 func cmdTargets(args []string, stdout io.Writer) error {
 	var (
-		fs     = newFlagSet("targets")
-		agent  = fs.String("agent", "", "restrict the listing to one agent")
-		root   = fs.String("root", "", "queue root directory")
-		asJSON = fs.Bool("json", false, "print JSON instead of a table")
+		fs        = newFlagSet("targets")
+		agentFlag = fs.String("agent", "", "restrict the listing to one agent")
+		root      = fs.String("root", "", "queue root directory")
+		asJSON    = fs.Bool("json", false, "print JSON instead of a table")
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue targets [--agent AGENT] [--root DIR] [--json]",
@@ -26,11 +27,20 @@ func cmdTargets(args []string, stdout io.Writer) error {
 		return fmt.Errorf("%w\nusage: agentqueue targets [--agent AGENT] [--root DIR] [--json]", err)
 	}
 
+	filter := ""
+	if value := strings.TrimSpace(*agentFlag); value != "" {
+		name, err := parseAgent(value)
+		if err != nil {
+			return err
+		}
+		filter = name.String()
+	}
+
 	q, err := openQueue(*root)
 	if err != nil {
 		return err
 	}
-	boxes, err := q.Mailboxes(*agent)
+	boxes, err := q.Mailboxes(filter)
 	if err != nil {
 		return err
 	}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/agent"
 )
 
 // Exit codes. They are part of the CLI contract: an agent's shell needs to tell
@@ -253,7 +254,44 @@ func resolveTarget(to string) (agentqueue.Target, error) {
 	if strings.TrimSpace(to) == "" {
 		return agentqueue.Target{}, errors.New("--to is required, for example --to codex:my-thread")
 	}
-	return agentqueue.ParseTarget(to)
+	target, err := agentqueue.ParseTarget(to)
+	if err != nil {
+		return agentqueue.Target{}, err
+	}
+	return checkTargetAgent(target)
+}
+
+// parseAgent reads an agent name supplied by the user. Every CLI surface that
+// takes an agent goes through it, so a mistyped name is refused here instead
+// of quietly addressing storage no session reads.
+func parseAgent(value string) (agent.Name, error) {
+	name, err := agent.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("%w (want one of %s)", err, agentNames())
+	}
+	return name, nil
+}
+
+// checkTargetAgent validates the agent half of an <agent>:<name> target and
+// rewrites an accepted alias to its canonical spelling, so one session is
+// never split across two mailboxes.
+func checkTargetAgent(t agentqueue.Target) (agentqueue.Target, error) {
+	name, err := parseAgent(t.Agent)
+	if err != nil {
+		return agentqueue.Target{}, fmt.Errorf("target %q: %w", t, err)
+	}
+	t.Agent = name.String()
+	return t, nil
+}
+
+// agentNames lists the known agent names for an error message.
+func agentNames() string {
+	names := agent.Names()
+	spellings := make([]string, 0, len(names))
+	for _, name := range names {
+		spellings = append(spellings, name.String())
+	}
+	return strings.Join(spellings, ", ")
 }
 
 // parseMeta turns repeated key=value flags into a map.

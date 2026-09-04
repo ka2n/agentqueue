@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/agent"
 )
 
 // TestRegisterWritesAddressWithoutToken is the security property: the session's
@@ -146,18 +147,19 @@ func TestRegisterTargetDerivation(t *testing.T) {
 	tests := []struct {
 		name      string
 		to        string
-		agent     string
+		agent     agent.Name
 		sessionID string
 		env       map[string]string
 		want      string
 		wantErr   bool
 	}{
-		{name: "to wins over agent", to: "codex:thread", agent: "claude", want: "codex:thread"},
-		{name: "agent plus payload id", agent: "claude", sessionID: "s1", want: "claude:s1"},
-		{name: "custom agent", agent: "pi", sessionID: "s1", want: "pi:s1"},
-		{name: "blank agent defaults to claude", agent: "  ", sessionID: "s1", want: "claude:s1"},
-		{name: "env fallback", agent: "claude", env: map[string]string{"CLAUDE_CODE_SESSION_ID": "env-id"}, want: "claude:env-id"},
-		{name: "nothing to register", agent: "claude", wantErr: true},
+		{name: "to wins over agent", to: "codex:thread", agent: agent.Claude, want: "codex:thread"},
+		{name: "to alias is canonicalized", to: "codex-cli:thread", agent: agent.Claude, want: "codex:thread"},
+		{name: "to with an unknown agent is refused", to: "gemini:thread", agent: agent.Claude, wantErr: true},
+		{name: "agent plus payload id", agent: agent.Claude, sessionID: "s1", want: "claude:s1"},
+		{name: "custom agent", agent: agent.Pi, sessionID: "s1", want: "pi:s1"},
+		{name: "env fallback", agent: agent.Claude, env: map[string]string{"CLAUDE_CODE_SESSION_ID": "env-id"}, want: "claude:env-id"},
+		{name: "nothing to register", agent: agent.Claude, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -175,6 +177,22 @@ func TestRegisterTargetDerivation(t *testing.T) {
 				t.Fatalf("registerTarget = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRegisterRejectsAnUnknownAgent covers the CLI boundary: an agent name
+// that is not one of crossagent's is refused rather than silently registering
+// a mailbox no session reads.
+func TestRegisterRejectsAnUnknownAgent(t *testing.T) {
+	for _, cmd := range []string{"register", "unregister"} {
+		var out, errOut bytes.Buffer
+		code := run(context.Background(), []string{cmd, "--root", t.TempDir(), "--agent", "bogus"}, strings.NewReader(""), &out, &errOut)
+		if code == exitOK {
+			t.Fatalf("%s --agent bogus exit = %d, want non-zero", cmd, code)
+		}
+		if !strings.Contains(errOut.String(), "unknown agent") {
+			t.Fatalf("%s --agent bogus stderr = %q, want an unknown-agent error", cmd, errOut.String())
+		}
 	}
 }
 

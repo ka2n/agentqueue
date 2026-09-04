@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/crossagent/agent"
 )
 
 // readHookPayload decodes a hook payload from stdin when one is there.
@@ -70,33 +71,34 @@ func registerAddress(q *agentqueue.Queue, t agentqueue.Target, in hookInput, get
 
 // registerTarget derives the target to register: --to wins, then the payload's
 // session_id, then $CLAUDE_CODE_SESSION_ID, under the given agent.
-func registerTarget(to, agent, sessionID string, getenv func(string) string) (agentqueue.Target, error) {
+func registerTarget(to string, name agent.Name, sessionID string, getenv func(string) string) (agentqueue.Target, error) {
 	if s := strings.TrimSpace(to); s != "" {
-		return agentqueue.ParseTarget(s)
+		target, err := agentqueue.ParseTarget(s)
+		if err != nil {
+			return agentqueue.Target{}, err
+		}
+		return checkTargetAgent(target)
 	}
-	if strings.TrimSpace(agent) == "" {
-		agent = "claude"
+	session := strings.TrimSpace(sessionID)
+	if session == "" {
+		session = strings.TrimSpace(getenv("CLAUDE_CODE_SESSION_ID"))
 	}
-	name := strings.TrimSpace(sessionID)
-	if name == "" {
-		name = strings.TrimSpace(getenv("CLAUDE_CODE_SESSION_ID"))
-	}
-	if name == "" {
+	if session == "" {
 		return agentqueue.Target{}, errors.New("no --to, session_id on stdin or $CLAUDE_CODE_SESSION_ID")
 	}
-	return agentqueue.Target{Agent: strings.TrimSpace(agent), Name: name}, nil
+	return agentqueue.Target{Agent: name.String(), Name: session}, nil
 }
 
 // --- register ---
 
 func cmdRegister(args []string, stdin io.Reader, stdout io.Writer) error {
 	var (
-		fs     = newFlagSet("register")
-		to     = fs.String("to", "", "target session as <agent>:<name>")
-		agent  = fs.String("agent", "claude", "agent name to register under")
-		root   = fs.String("root", "", "queue root directory")
-		quiet  = fs.Bool("quiet", false, "print nothing on success")
-		asJSON = fs.Bool("json", false, "print the recorded address as JSON")
+		fs        = newFlagSet("register")
+		to        = fs.String("to", "", "target session as <agent>:<name>")
+		agentFlag = fs.String("agent", string(agent.Claude), "agent name to register under")
+		root      = fs.String("root", "", "queue root directory")
+		quiet     = fs.Bool("quiet", false, "print nothing on success")
+		asJSON    = fs.Bool("json", false, "print the recorded address as JSON")
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]",
@@ -105,11 +107,15 @@ func cmdRegister(args []string, stdin io.Reader, stdout io.Writer) error {
 		return fmt.Errorf("%w\nusage: agentqueue register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]", err)
 	}
 
+	name, err := parseAgent(*agentFlag)
+	if err != nil {
+		return err
+	}
 	in, err := readHookPayload(stdin)
 	if err != nil {
 		return err
 	}
-	target, err := registerTarget(*to, *agent, in.SessionID, os.Getenv)
+	target, err := registerTarget(*to, name, in.SessionID, os.Getenv)
 	if err != nil {
 		// Nothing to register is not a failure: the hook this runs from must
 		// stay silent when it cannot tell which session it is in.
@@ -140,11 +146,11 @@ func cmdRegister(args []string, stdin io.Reader, stdout io.Writer) error {
 
 func cmdUnregister(args []string, stdin io.Reader, stdout io.Writer) error {
 	var (
-		fs    = newFlagSet("unregister")
-		to    = fs.String("to", "", "target session as <agent>:<name>")
-		agent = fs.String("agent", "claude", "agent name the session was registered under")
-		root  = fs.String("root", "", "queue root directory")
-		quiet = fs.Bool("quiet", false, "print nothing on success")
+		fs        = newFlagSet("unregister")
+		to        = fs.String("to", "", "target session as <agent>:<name>")
+		agentFlag = fs.String("agent", string(agent.Claude), "agent name the session was registered under")
+		root      = fs.String("root", "", "queue root directory")
+		quiet     = fs.Bool("quiet", false, "print nothing on success")
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]",
@@ -153,11 +159,15 @@ func cmdUnregister(args []string, stdin io.Reader, stdout io.Writer) error {
 		return fmt.Errorf("%w\nusage: agentqueue unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]", err)
 	}
 
+	name, err := parseAgent(*agentFlag)
+	if err != nil {
+		return err
+	}
 	in, err := readHookPayload(stdin)
 	if err != nil {
 		return err
 	}
-	target, err := registerTarget(*to, *agent, in.SessionID, os.Getenv)
+	target, err := registerTarget(*to, name, in.SessionID, os.Getenv)
 	if err != nil {
 		return nil
 	}
