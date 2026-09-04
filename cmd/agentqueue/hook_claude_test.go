@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/ka2n/agentqueue"
 )
 
 // hookPayload renders a hook stdin payload.
@@ -365,6 +366,28 @@ func TestHookDispatchRejectsUnknownAgent(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "no hook integration") {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestHookClaudeReadsCustomMailboxWithoutTransport(t *testing.T) {
+	root := t.TempDir()
+	q, err := agentqueue.Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	item, err := q.Push(agentqueue.Target{Agent: "custom", Name: "x"}, "custom hook body", nil)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	stdout := runHook(t, root, hookPayload(t, map[string]any{
+		"hook_event_name": "UserPromptSubmit", "session_id": "ignored",
+	}), "--to", "custom:x")
+	if !strings.Contains(stdout, "custom hook body") || !strings.Contains(stdout, item.ID) {
+		t.Fatalf("hook output = %q, want the custom item", stdout)
+	}
+	if got := countIn(t, root, "custom", "x", "claimed"); got != 1 {
+		t.Fatalf("claimed = %d, want one custom item", got)
 	}
 }
 

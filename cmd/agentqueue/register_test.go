@@ -154,16 +154,17 @@ func TestRegisterTargetDerivation(t *testing.T) {
 		wantErr   bool
 	}{
 		{name: "to wins over agent", to: "codex:thread", agent: agent.Claude, want: "codex:thread"},
-		{name: "to alias is canonicalized", to: "codex-cli:thread", agent: agent.Claude, want: "codex:thread"},
-		{name: "to with an unknown agent is refused", to: "gemini:thread", agent: agent.Claude, wantErr: true},
+		{name: "to alias remains a mailbox name", to: "codex-cli:thread", agent: agent.Claude, want: "codex-cli:thread"},
+		{name: "to with a custom agent is accepted", to: "gemini:thread", agent: agent.Claude, want: "gemini:thread"},
 		{name: "agent plus payload id", agent: agent.Claude, sessionID: "s1", want: "claude:s1"},
-		{name: "custom agent", agent: agent.Pi, sessionID: "s1", want: "pi:s1"},
+		{name: "pi agent", agent: agent.Pi, sessionID: "s1", want: "pi:s1"},
+		{name: "custom agent", agent: agent.Name("custom"), sessionID: "s1", want: "custom:s1"},
 		{name: "env fallback", agent: agent.Claude, env: map[string]string{"CLAUDE_CODE_SESSION_ID": "env-id"}, want: "claude:env-id"},
 		{name: "nothing to register", agent: agent.Claude, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := registerTarget(tt.to, tt.agent, tt.sessionID, func(k string) string { return tt.env[k] })
+			got, err := registerTarget(tt.to, tt.agent.String(), tt.sessionID, func(k string) string { return tt.env[k] })
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("registerTarget = %v, want error", got)
@@ -180,19 +181,29 @@ func TestRegisterTargetDerivation(t *testing.T) {
 	}
 }
 
-// TestRegisterRejectsAnUnknownAgent covers the CLI boundary: an agent name
-// that is not one of crossagent's is refused rather than silently registering
-// a mailbox no session reads.
-func TestRegisterRejectsAnUnknownAgent(t *testing.T) {
-	for _, cmd := range []string{"register", "unregister"} {
-		var out, errOut bytes.Buffer
-		code := run(context.Background(), []string{cmd, "--root", t.TempDir(), "--agent", "bogus"}, strings.NewReader(""), &out, &errOut)
-		if code == exitOK {
-			t.Fatalf("%s --agent bogus exit = %d, want non-zero", cmd, code)
-		}
-		if !strings.Contains(errOut.String(), "unknown agent") {
-			t.Fatalf("%s --agent bogus stderr = %q, want an unknown-agent error", cmd, errOut.String())
-		}
+// TestRegisterAcceptsCustomAgent covers address management for a mailbox
+// namespace that crossagent does not know about.
+func TestRegisterAcceptsCustomAgent(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "custom-session")
+	var out, errOut bytes.Buffer
+	if code := run(context.Background(), []string{"register", "--root", root, "--agent", "custom"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("register exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "registered custom:custom-session") {
+		t.Fatalf("register output = %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "custom", "custom-session", "addr.json")); err != nil {
+		t.Fatalf("custom address not written: %v", err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run(context.Background(), []string{"unregister", "--root", root, "--agent", "custom"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("unregister exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "unregistered custom:custom-session") {
+		t.Fatalf("unregister output = %q", out.String())
 	}
 }
 

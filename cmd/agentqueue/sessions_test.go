@@ -112,6 +112,22 @@ func TestCmdSessionsRejectsInvalidArguments(t *testing.T) {
 	}
 }
 
+func TestSessionsRejectsCustomAgentWithCrossagentError(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AGENTQUEUE_ROOT", root)
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), []string{"sessions", "--agent", "custom"}, strings.NewReader(""), &out, &errOut)
+	if code != exitError {
+		t.Fatalf("sessions exit = %d, want %d", code, exitError)
+	}
+	message := errOut.String()
+	if !strings.Contains(message, "unknown agent") || !strings.Contains(message, "want one of claude, codex, pi") {
+		t.Fatalf("sessions stderr = %q, want the crossagent unknown-agent message", message)
+	}
+}
+
 func TestRunDispatchesSessions(t *testing.T) {
 	home := t.TempDir()
 	root := t.TempDir()

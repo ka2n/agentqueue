@@ -71,7 +71,7 @@ func Agents() []string {
 func (q *Queue) PushAndNotify(ctx context.Context, t Target, text string, meta map[string]string) (*Item, error) {
 	transport, ok := Lookup(t.Agent)
 	if !ok {
-		return nil, fmt.Errorf("%w: no transport for agent %q", ErrInvalidTarget, t.Agent)
+		return nil, fmt.Errorf("%w: no transport registered for agent %q; register a transport with agentqueue.Register", ErrInvalidTarget, t.Agent)
 	}
 
 	item, err := q.Push(t, text, meta)

@@ -168,11 +168,11 @@ func registerForTest(t *testing.T, tr Transport) {
 }
 
 func TestPushAndNotify(t *testing.T) {
-	t.Run("happy path notifies once", func(t *testing.T) {
+	t.Run("registered custom transport notifies once", func(t *testing.T) {
 		q, root := mustOpen(t)
-		stub := &stubTransport{name: "stub"}
+		stub := &stubTransport{name: "custom"}
 		registerForTest(t, stub)
-		target := Target{Agent: "stub", Name: "s"}
+		target := Target{Agent: "custom", Name: "s"}
 
 		item, err := q.PushAndNotify(context.Background(), target, "body text", map[string]string{"k": "v"})
 		if err != nil {
@@ -190,7 +190,7 @@ func TestPushAndNotify(t *testing.T) {
 		if diff := cmp.Diff(want, stub.notices[0]); diff != "" {
 			t.Fatalf("notice mismatch (-want +got):\n%s", diff)
 		}
-		if _, err := os.Stat(filepath.Join(root, "stub", "s", "pending", item.ID+".json")); err != nil {
+		if _, err := os.Stat(filepath.Join(root, "custom", "s", "pending", item.ID+".json")); err != nil {
 			t.Fatalf("item not pending: %v", err)
 		}
 	})
@@ -227,6 +227,12 @@ func TestPushAndNotify(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "ghost") {
 			t.Fatalf("error %q does not name the unknown agent", err)
+		}
+		if !strings.Contains(err.Error(), "no transport registered") {
+			t.Fatalf("error %q does not describe the missing transport", err)
+		}
+		if !strings.Contains(err.Error(), "agentqueue.Register") {
+			t.Fatalf("error %q does not name the registration extension point", err)
 		}
 	})
 }

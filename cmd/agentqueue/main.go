@@ -249,39 +249,26 @@ func openQueue(override string) (*agentqueue.Queue, error) {
 	}))
 }
 
-// resolveTarget parses the --to value.
+// resolveTarget parses the --to value. Target agents are mailbox namespaces,
+// not crossagent session identities, so the queue's syntax parser is the only
+// validation at this boundary. PushAndNotify performs the transport check
+// when delivery is requested.
 func resolveTarget(to string) (agentqueue.Target, error) {
 	if strings.TrimSpace(to) == "" {
 		return agentqueue.Target{}, errors.New("--to is required, for example --to codex:my-thread")
 	}
-	target, err := agentqueue.ParseTarget(to)
-	if err != nil {
-		return agentqueue.Target{}, err
-	}
-	return checkTargetAgent(target)
+	return agentqueue.ParseTarget(to)
 }
 
-// parseAgent reads an agent name supplied by the user. Every CLI surface that
-// takes an agent goes through it, so a mistyped name is refused here instead
-// of quietly addressing storage no session reads.
+// parseAgent reads an agent name used to select a crossagent-backed operation.
+// Those operations need an agent that crossagent knows how to enumerate or
+// configure, unlike queue targets, which are arbitrary mailbox namespaces.
 func parseAgent(value string) (agent.Name, error) {
 	name, err := agent.Parse(value)
 	if err != nil {
 		return "", fmt.Errorf("%w (want one of %s)", err, agentNames())
 	}
 	return name, nil
-}
-
-// checkTargetAgent validates the agent half of an <agent>:<name> target and
-// rewrites an accepted alias to its canonical spelling, so one session is
-// never split across two mailboxes.
-func checkTargetAgent(t agentqueue.Target) (agentqueue.Target, error) {
-	name, err := parseAgent(t.Agent)
-	if err != nil {
-		return agentqueue.Target{}, fmt.Errorf("target %q: %w", t, err)
-	}
-	t.Agent = name.String()
-	return t, nil
 }
 
 // agentNames lists the known agent names for an error message.

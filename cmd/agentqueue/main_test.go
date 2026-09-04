@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/ka2n/agentqueue"
 )
 
 func TestResolveRoot(t *testing.T) {
@@ -71,6 +72,7 @@ func TestResolveTarget(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "explicit agent", in: "codex:thread-1", want: "codex:thread-1"},
+		{name: "custom agent", in: "custom:thread-1", want: "custom:thread-1"},
 		{name: "bare name defaults to claude", in: "reviewer", want: "claude:reviewer"},
 		{name: "trims spaces", in: "  codex:t  ", want: "codex:t"},
 		{name: "missing", in: "", wantErr: true},
@@ -215,6 +217,84 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "acked "+id) {
 		t.Fatalf("ack output = %q", out.String())
+	}
+}
+
+func TestRunPushUnknownAgentReportsMissingTransport(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), []string{"push", "--root", t.TempDir(), "--to", "custom:x", "hello"}, strings.NewReader(""), &out, &errOut)
+	if code != exitError {
+		t.Fatalf("push exit = %d, want %d", code, exitError)
+	}
+	message := errOut.String()
+	if !strings.Contains(message, "no transport registered for agent") {
+		t.Fatalf("push stderr = %q, want a missing-transport error", message)
+	}
+	if !strings.Contains(message, "agentqueue.Register") {
+		t.Fatalf("push stderr = %q, want the registration extension point", message)
+	}
+	if strings.Contains(message, "want one of claude, codex, pi") {
+		t.Fatalf("push stderr = %q, must not use the crossagent agent list", message)
+	}
+}
+
+func TestRunCustomMailboxCommandsDoNotRequireTransport(t *testing.T) {
+	root := t.TempDir()
+	target := agentqueue.Target{Agent: "custom", Name: "x"}
+	q, err := agentqueue.Open(root)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	item, err := q.Push(target, "custom body", nil)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	if code := run(context.Background(), []string{"list", "--root", root, "--to", "custom:x"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("list exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), item.ID) {
+		t.Fatalf("list output = %q, want %q", out.String(), item.ID)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run(context.Background(), []string{"targets", "--root", root, "--agent", "custom", "--json"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("targets exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), `"agent": "custom"`) || !strings.Contains(out.String(), `"name": "x"`) {
+		t.Fatalf("targets output = %q, want the custom mailbox", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run(context.Background(), []string{"take", "--root", root, "--to", "custom:x", "--next"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("take exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "custom body") {
+		t.Fatalf("take output = %q, want the custom body", out.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := run(context.Background(), []string{"ack", "--root", root, "--to", "custom:x", item.ID}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("ack exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "acked "+item.ID) {
+		t.Fatalf("ack output = %q", out.String())
+	}
+
+	if _, err := q.Push(target, "custom wait body", nil); err != nil {
+		t.Fatalf("Push for wait: %v", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run(context.Background(), []string{"wait", "--root", root, "--to", "custom:x", "--timeout", "1"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		t.Fatalf("wait exit = %d (stderr: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "custom wait body") {
+		t.Fatalf("wait output = %q, want the custom body", out.String())
 	}
 }
 

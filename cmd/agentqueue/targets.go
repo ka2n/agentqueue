@@ -27,14 +27,7 @@ func cmdTargets(args []string, stdout io.Writer) error {
 		return fmt.Errorf("%w\nusage: agentqueue targets [--agent AGENT] [--root DIR] [--json]", err)
 	}
 
-	filter := ""
-	if value := strings.TrimSpace(*agentFlag); value != "" {
-		name, err := parseAgent(value)
-		if err != nil {
-			return err
-		}
-		filter = name.String()
-	}
+	filter := strings.TrimSpace(*agentFlag)
 
 	q, err := openQueue(*root)
 	if err != nil {

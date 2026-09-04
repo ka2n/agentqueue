@@ -234,14 +234,15 @@ func hookClaude(to, root string, max int, noBlock bool, stdin io.Reader, getenv 
 }
 
 // hookTarget derives the mailbox to read: --to, else the payload's session_id,
-// else $CLAUDE_CODE_SESSION_ID. The agent is always claude.
+// else $CLAUDE_CODE_SESSION_ID. The default agent is claude, but an explicit
+// --to may name any mailbox namespace.
 func hookTarget(to, sessionID string, getenv func(string) string) (agentqueue.Target, error) {
 	if s := strings.TrimSpace(to); s != "" {
 		target, err := agentqueue.ParseTarget(s)
 		if err != nil {
 			return agentqueue.Target{}, err
 		}
-		return checkTargetAgent(target)
+		return target, nil
 	}
 	name := strings.TrimSpace(sessionID)
 	if name == "" {

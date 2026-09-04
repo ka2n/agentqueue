@@ -485,12 +485,8 @@ type Transport interface {
 ```
 
 Implement it, then `agentqueue.Register(&myTransport{})` — after which
-`<myagent>:<name>` targets work throughout the library. The `Notice` you get
+`<myagent>:<name>` targets work everywhere, CLI included. The `Notice` you get
 carries `Target`, `ItemID`, `Pending` and `FetchCmd`; keep the body out of it.
-
-The CLI is narrower: it validates every agent name it takes from the user
-against `crossagent/agent`, so a new agent also needs a name in that package
-before `agentqueue push --to myagent:x` will accept it.
 
 If your agent is pull-based, like Claude Code, `Notify` should be a no-op:
 enqueuing is complete once the item is stored, and delivery happens when the
