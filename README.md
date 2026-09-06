@@ -92,18 +92,18 @@ only.
 prospective document, then verifies it against the original before anything
 reaches the disk: entries belonging to other tools remain under wrappers whose
 other fields (`matcher` included) survive; nothing outside `hooks` changes; and
-every added or adopted entry is an agentqueue command. If any of that does not
+every added or rewritten entry is an agentqueue command. If any of that does not
 hold, nothing is written and the command exits non-zero. `uninstall` enforces
-the mirror image: only explicitly marked agentqueue entries or legacy entries
-adopted by its ownership predicate may disappear, nothing may be added,
-nothing outside `hooks` may change, and wrappers and event lists that removal
-empties are pruned.
+the mirror image: only entries owned by the agentqueue command predicate may
+disappear, nothing may be added, nothing outside `hooks` may change, and wrappers
+and event lists that removal empties are pruned.
 
-Install adopts matching unmarked legacy `agentqueue` commands by default. The
-plan reports the number adopted, and the diff shows their replacement with
-marked entries (`installedBy` plus a stable per-hook id). Entries carrying
-another tool's marker are never adopted, even if their command happens to
-mention agentqueue.
+Claude ownership is command-based: a hook whose executable basename is
+`agentqueue` is owned by this integration, regardless of unknown marker keys
+left by an older installer. Newly written Claude entries contain no ownership
+markers, because Claude Code strips unknown hook-entry keys when it rewrites
+settings. Other tools' commands remain untouched even when they carry their own
+marker fields.
 
 The write itself goes through a temp file in the same directory and one
 rename, so an interrupt or a full disk part-way through leaves your
@@ -119,8 +119,8 @@ the whole plan and stops, and `--print` emits just the hooks block to paste in
 yourself without inspecting or writing a settings file. By default install
 runs a self-check of the exact command it is about to write; `--skip-self-check`
 opts out only for an intentionally older or wrapped binary. Installing is
-idempotent: re-running it is a no-op. `agentqueue uninstall` removes marked
-entries and matching legacy entries that the ownership predicate can adopt.
+idempotent: re-running it is a no-op. `agentqueue uninstall` removes entries
+owned by the same command predicate.
 
 ### Reinstalling after the binary moves
 
@@ -343,8 +343,8 @@ syntax and examples without consulting this document.
 | `register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]` | Record a session address from an explicit target or a hook payload/environment. `--quiet` suppresses the success line; `--json` prints the stored address. |
 | `unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]` | Remove a recorded session address. Removing a missing address succeeds. |
 | `hook claude [--to <agent>:<name>] [--root DIR] [--max N] [--log FILE] [--no-block]` | Serve Claude Code's synchronous hook protocol: read stdin, claim pending messages and print injection JSON. It always exits 0, even on internal failure, so it cannot disrupt a session. |
-| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude gets marked hooks and adopts matching unmarked legacy hooks by default; Codex needs no setup, and Pi uses the extension. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
-| `uninstall [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]` | Remove only agentqueue's marked Claude hooks and matching legacy hooks, preserving other settings and hooks. `--diff` and `--dry-run` do not write; a refused safety check exits non-zero. |
+| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude owns entries whose command matches the agentqueue predicate and writes new entries without ownership markers; Codex needs no setup, and Pi uses the extension. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
+| `uninstall [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]` | Remove only Claude hooks whose command matches agentqueue's ownership predicate, preserving other settings and hooks. `--diff` and `--dry-run` do not write; a refused safety check exits non-zero. |
 
 Queue commands that expose `--root` resolve it from that flag, then
 `$AGENTQUEUE_ROOT`, `$XDG_STATE_HOME/agentqueue`, and

@@ -22,8 +22,9 @@ const (
 	selfCheckTimeout   = time.Second
 )
 
-// claudeHookSpecs is the complete agentqueue integration for Claude. IDs are
-// stable so crossagent can identify the same hook when an invocation changes.
+// claudeHookSpecs is the complete agentqueue integration for Claude. The IDs
+// are part of the crossagent declaration, but Claude settings do not persist
+// the marker fields that would store them.
 func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 	return []crosshooks.HookSpec{
 		{Event: crosshooks.EventSessionStart, Command: invocation + " register --agent claude", ID: "session-start-register"},
@@ -40,10 +41,8 @@ func hookBlock(specs []crosshooks.HookSpec) map[string]any {
 	byEvent := make(map[string][]any)
 	for _, spec := range specs {
 		entry := map[string]any{
-			"type":                      "command",
-			"command":                   spec.Command,
-			crosshooks.MarkerOwnerField: agentqueueToolName,
-			crosshooks.MarkerIDField(agentqueueToolName): spec.ID,
+			"type":    "command",
+			"command": spec.Command,
 		}
 		event := string(spec.Event)
 		byEvent[event] = append(byEvent[event], entry)
@@ -133,15 +132,14 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 		return crosshooks.ConfigManager{}, err
 	}
 	manager := crosshooks.ConfigManager{
-		Resolver:      paths.DefaultResolver(),
-		Agent:         crosshooks.AgentClaude,
-		Scope:         scopeValue,
-		CWD:           cwd,
-		SettingsPath:  strings.TrimSpace(settings),
-		ToolName:      agentqueueToolName,
-		Invocation:    invocation,
-		Ownership:     crosshooks.DefaultOwnershipPredicate(agentqueueToolName),
-		AdoptUnmarked: true,
+		Resolver:     paths.DefaultResolver(),
+		Agent:        crosshooks.AgentClaude,
+		Scope:        scopeValue,
+		CWD:          cwd,
+		SettingsPath: strings.TrimSpace(settings),
+		ToolName:     agentqueueToolName,
+		Invocation:   invocation,
+		Ownership:    crosshooks.DefaultOwnershipPredicate(agentqueueToolName),
 	}
 	if strings.TrimSpace(invocation) != "" {
 		manager.Hooks = claudeHookSpecs(invocation)
@@ -154,13 +152,6 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 	return manager, nil
 }
 
-func plural(count int, singular, plural string) string {
-	if count == 1 {
-		return singular
-	}
-	return plural
-}
-
 func printHookPlan(stdout io.Writer, plan crosshooks.ChangePlan) {
 	if plan.FileExists {
 		fmt.Fprintf(stdout, "  file:    %s (exists, %d bytes)\n", plan.Path, plan.FileSize)
@@ -169,10 +160,6 @@ func printHookPlan(stdout io.Writer, plan crosshooks.ChangePlan) {
 	}
 	fmt.Fprintf(stdout, "  change:  +%d hook entries, -%d removed, %d modified\n",
 		plan.Summary.Added, plan.Summary.Removed, plan.Summary.Modified)
-	if len(plan.Unmarked) > 0 {
-		fmt.Fprintf(stdout, "  adoption: adopting %d unmarked %s by default (crossagent AdoptUnmarked=true)\n",
-			len(plan.Unmarked), plural(len(plan.Unmarked), "agentqueue hook", "agentqueue hooks"))
-	}
 	for _, event := range plan.Summary.Events {
 		fmt.Fprintf(stdout, "    %s: %d existing kept, +%d, -%d, %d modified\n",
 			event.Event, event.Kept, event.Added, event.Removed, event.Modified)
@@ -329,12 +316,12 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 		yes       = fs.Bool("yes", false, "do not ask for confirmation")
 		dryRun    = fs.Bool("dry-run", false, "print the plan and exit without writing")
 		diffOnly  = fs.Bool("diff", false, "print the plan and diff without writing or asking")
-		printer   = fs.Bool("print", false, "print the marked hooks block and exit")
+		printer   = fs.Bool("print", false, "print the hooks block and exit")
 		skipCheck = fs.Bool("skip-self-check", false, "skip the pre-write probe of the hook command")
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]",
-		"Install Claude hooks through crossagent's safety-checked, plan-first configuration manager. Unmarked agentqueue-looking hooks are adopted by default and shown in the plan; other tools' hooks are preserved. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
+		"Install Claude hooks through crossagent's safety-checked, plan-first configuration manager. Claude ownership is determined by the agentqueue command predicate, and other tools' hooks are preserved. Claude settings entries are written without ownership-marker fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
 	}
@@ -389,14 +376,14 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 		agentFlag = fs.String("agent", string(crosshooks.AgentClaude), "agent whose integration to remove")
 		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local")
 		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
-		command   = fs.String("command", "", "hook command invocation used to identify legacy entries")
+		command   = fs.String("command", "", "hook command invocation accepted for compatibility")
 		yes       = fs.Bool("yes", false, "do not ask for confirmation")
 		dryRun    = fs.Bool("dry-run", false, "print the plan and exit without writing")
 		diffOnly  = fs.Bool("diff", false, "print the plan and diff without writing or asking")
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]",
-		"Remove only Claude hooks through crossagent's plan-first configuration manager. Explicitly marked hooks and legacy unmarked agentqueue-looking hooks are removed; other tools' hooks are preserved. Refusals exit non-zero.")
+		"Remove only Claude hooks owned by the agentqueue command predicate through crossagent's plan-first configuration manager; other tools' hooks are preserved. Refusals exit non-zero.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]", err)
 	}
@@ -429,11 +416,6 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 	if !plan.HasChanges {
 		fmt.Fprintf(stdout, "claude: no hooks in %s, nothing to do\n", plan.Path)
 		return nil
-	}
-	if *command != "" {
-		// The marker-first policy does not need a command to find marked hooks;
-		// retain this flag as an explanatory acknowledgement for legacy users.
-		fmt.Fprintf(stdout, "uninstall: considering legacy hooks matching %q\n", strings.TrimSpace(*command))
 	}
 	return applyHookPlan(ctx, manager, plan, stdin, stdout, *yes, *dryRun, *diffOnly, true)
 }
