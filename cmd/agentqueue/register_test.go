@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/agentqueue/hookserve"
 	"github.com/ka2n/crossagent/agent"
 )
 
@@ -164,7 +165,7 @@ func TestRegisterTargetDerivation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := registerTarget(tt.to, tt.agent.String(), tt.sessionID, func(k string) string { return tt.env[k] })
+			got, err := hookserve.RegisterTarget(tt.to, tt.agent.String(), tt.sessionID, func(k string) string { return tt.env[k] })
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("registerTarget = %v, want error", got)

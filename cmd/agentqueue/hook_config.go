@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/ka2n/agentqueue/hookserve"
 	"github.com/ka2n/crossagent"
 	crosshooks "github.com/ka2n/crossagent/hooks"
 	"github.com/ka2n/crossagent/paths"
@@ -148,7 +149,7 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 		manager.Hooks = claudeHookSpecs(invocation)
 		manager.Probe = &crosshooks.Probe{
 			Command:       []string{executable, "hook", "claude", "--self-check"},
-			ExpectedToken: selfCheckToken,
+			ExpectedToken: hookserve.SelfCheckToken,
 			Timeout:       selfCheckTimeout,
 		}
 	}

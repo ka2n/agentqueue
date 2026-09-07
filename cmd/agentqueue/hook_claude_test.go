@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/ka2n/agentqueue"
+	"github.com/ka2n/agentqueue/hookserve"
 )
 
 // hookPayload renders a hook stdin payload.
@@ -183,7 +184,7 @@ func TestHookClaudeDeliversPerEvent(t *testing.T) {
 				return
 			}
 
-			var got hookOutput
+			var got hookserve.Output
 			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 				t.Fatalf("stdout is not hook JSON (%v): %s", err, stdout)
 			}
@@ -239,7 +240,7 @@ func TestHookClaudeContextExplainsItself(t *testing.T) {
 	stdout := runHook(t, root, hookPayload(t, map[string]any{
 		"hook_event_name": "UserPromptSubmit", "session_id": "s1",
 	}))
-	var got hookOutput
+	var got hookserve.Output
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("decode hook output: %v", err)
 	}
@@ -409,7 +410,7 @@ func TestHookTargetDerivation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := hookTarget(tt.to, tt.sessionID, func(k string) string { return tt.env[k] })
+			got, err := hookserve.Target(tt.to, tt.sessionID, func(k string) string { return tt.env[k] })
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("hookTarget = %v, want error", got)
