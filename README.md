@@ -98,12 +98,13 @@ the mirror image: only entries owned by the agentqueue command predicate may
 disappear, nothing may be added, nothing outside `hooks` may change, and wrappers
 and event lists that removal empties are pruned.
 
-Claude ownership is command-based: a hook whose executable basename is
-`agentqueue` is owned by this integration, regardless of unknown marker keys
-left by an older installer. Newly written Claude entries contain no ownership
-markers, because Claude Code strips unknown hook-entry keys when it rewrites
-settings. Other tools' commands remain untouched even when they carry their own
-marker fields.
+Claude ownership is recorded in the known command field: installed commands
+end with ` #crossagent:v1:<base64url(tool)>:<base64url(id)>`. The executable
+basename predicate is still used to recognize and converge commands when a
+binary moves or a hand edit has lost its suffix. Newly written entries have
+only Claude's known `type` and `command` fields, so there
+are no separate ownership keys for Claude Code to strip when it rewrites
+settings. Other tools' commands and metadata remain untouched.
 
 The write itself goes through a temp file in the same directory and one
 rename, so an interrupt or a full disk part-way through leaves your
@@ -343,7 +344,7 @@ syntax and examples without consulting this document.
 | `register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]` | Record a session address from an explicit target or a hook payload/environment. `--quiet` suppresses the success line; `--json` prints the stored address. |
 | `unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]` | Remove a recorded session address. Removing a missing address succeeds. |
 | `hook claude [--to <agent>:<name>] [--root DIR] [--max N] [--log FILE] [--no-block]` | Serve Claude Code's synchronous hook protocol: read stdin, claim pending messages and print injection JSON. It always exits 0, even on internal failure, so it cannot disrupt a session. |
-| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude owns entries whose command matches the agentqueue predicate and writes new entries without ownership markers; Codex needs no setup, and Pi uses the extension. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
+| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude writes suffix-marked commands with no extra JSON ownership fields; Codex needs no setup, and Pi uses the extension. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
 | `uninstall [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]` | Remove only Claude hooks whose command matches agentqueue's ownership predicate, preserving other settings and hooks. `--diff` and `--dry-run` do not write; a refused safety check exits non-zero. |
 
 Queue commands that expose `--root` resolve it from that flag, then

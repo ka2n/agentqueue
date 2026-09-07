@@ -51,11 +51,63 @@ func commandEntriesForTest(settings map[string]any, event string) []map[string]a
 	return entries
 }
 
-func assertNoClaudeMarkerFields(t *testing.T, entry map[string]any) {
+func assertClaudeCommandEntry(t *testing.T, entry map[string]any) string {
 	t.Helper()
-	for _, key := range []string{crosshooks.MarkerOwnerField, crosshooks.MarkerIDField(agentqueueToolName)} {
-		if _, ok := entry[key]; ok {
-			t.Fatalf("Claude hook unexpectedly has %s: %#v", key, entry)
+	if len(entry) != 2 || entry["type"] != "command" {
+		t.Fatalf("Claude hook has unexpected JSON fields: %#v", entry)
+	}
+	command, ok := entry["command"].(string)
+	if !ok || command == "" {
+		t.Fatalf("Claude hook has no command: %#v", entry)
+	}
+	for key := range entry {
+		if key != "type" && key != "command" {
+			t.Fatalf("Claude hook has unexpected JSON field %q: %#v", key, entry)
+		}
+	}
+	return command
+}
+
+func assertClaudeSuffix(t *testing.T, entry map[string]any, wantClean, wantID string) {
+	t.Helper()
+	command := assertClaudeCommandEntry(t, entry)
+	clean, owner, id, marked := crosshooks.ParseCommandSuffixMarker(command)
+	if !marked {
+		t.Fatalf("Claude command has no suffix marker: %q", command)
+	}
+	if !strings.HasPrefix(command, clean+" #crossagent:v1:") {
+		t.Fatalf("Claude command does not have the expected suffix prefix: %q", command)
+	}
+	if clean != wantClean || owner != agentqueueToolName || id != wantID {
+		t.Fatalf("Claude suffix = clean %q, owner %q, id %q; want clean %q, owner %q, id %q", clean, owner, id, wantClean, agentqueueToolName, wantID)
+	}
+}
+
+func assertClaudeOwnedEntries(t *testing.T, settings map[string]any, want map[string]map[string]string) {
+	t.Helper()
+	owns := crosshooks.DefaultOwnershipPredicate(agentqueueToolName)
+	for event, expected := range want {
+		found := make(map[string]int)
+		for _, entry := range commandEntriesForTest(settings, event) {
+			command, ok := entry["command"].(string)
+			if !ok || !owns(crosshooks.HookEntry{Command: command}) {
+				continue
+			}
+			clean, owner, _, marked := crosshooks.ParseCommandSuffixMarker(command)
+			if !marked || owner != agentqueueToolName {
+				t.Fatalf("owned Claude command is missing its agentqueue suffix: %#v", entry)
+			}
+			wantID, ok := expected[clean]
+			if !ok {
+				t.Fatalf("unexpected owned Claude command %q in %s", clean, event)
+			}
+			assertClaudeSuffix(t, entry, clean, wantID)
+			found[clean]++
+		}
+		for clean := range expected {
+			if found[clean] != 1 {
+				t.Fatalf("%s has %d entries for clean command %q, want one", event, found[clean], clean)
+			}
 		}
 	}
 }
@@ -67,8 +119,8 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	foreignStart := map[string]any{
 		"type": "command", "command": "other-tool start", "vendor": map[string]any{"keep": true},
 	}
-	foreignMarked := map[string]any{
-		"type": "command", "command": "other-tool stop", "installedBy": "other-tool", "x-other-tool-id": "stop",
+	foreignMetadata := map[string]any{
+		"type": "command", "command": "other-tool stop", "provider": "other-tool", "hookID": "stop",
 	}
 	foreignStop := map[string]any{
 		"type": "command", "command": "other-tool finish", "async": true,
@@ -79,24 +131,24 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 			"SessionStart": []any{map[string]any{
 				"matcher": "*",
 				"hooks": []any{
-					map[string]any{"type": "command", "command": old + " register --agent claude", crosshooks.MarkerOwnerField: agentqueueToolName, crosshooks.MarkerIDField(agentqueueToolName): "old-register"},
-					map[string]any{"type": "command", "command": old + " hook claude"},
+					map[string]any{"type": "command", "command": crosshooks.BuildCommandSuffixMarker(old+" register --agent claude", agentqueueToolName, "session-start-register")},
+					map[string]any{"type": "command", "command": crosshooks.BuildCommandSuffixMarker(old+" hook claude", agentqueueToolName, "session-start-hook")},
 					foreignStart,
-					foreignMarked,
+					foreignMetadata,
 				},
 			}},
 			"UserPromptSubmit": []any{map[string]any{
-				"hooks": []any{map[string]any{"type": "command", "command": old + " hook claude", crosshooks.MarkerOwnerField: agentqueueToolName, crosshooks.MarkerIDField(agentqueueToolName): "old-prompt"}},
+				"hooks": []any{map[string]any{"type": "command", "command": crosshooks.BuildCommandSuffixMarker(old+" hook claude", agentqueueToolName, "user-prompt-submit-hook")}},
 			}},
 			"Stop": []any{map[string]any{
 				"matcher": "",
 				"hooks": []any{
-					map[string]any{"type": "command", "command": old + " hook claude"},
+					map[string]any{"type": "command", "command": crosshooks.BuildCommandSuffixMarker(old+" hook claude", agentqueueToolName, "stop-hook")},
 					foreignStop,
 				},
 			}},
 			"SessionEnd": []any{map[string]any{
-				"hooks": []any{map[string]any{"type": "command", "command": old + " unregister --agent claude", crosshooks.MarkerOwnerField: agentqueueToolName, crosshooks.MarkerIDField(agentqueueToolName): "old-unregister"}},
+				"hooks": []any{map[string]any{"type": "command", "command": crosshooks.BuildCommandSuffixMarker(old+" unregister --agent claude", agentqueueToolName, "session-end-unregister")}},
 			}},
 		},
 	})
@@ -109,11 +161,11 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Unmarked) != 0 {
-		t.Fatalf("Claude predicate matches were reported as unmarked: %#v", plan.Unmarked)
+	if plan.Style != crosshooks.MarkerStyleCommandSuffix {
+		t.Fatalf("Claude auto marker style = %q, want command suffix", plan.Style)
 	}
-	if !plan.HasChanges {
-		t.Fatal("stale agentqueue commands were not converged")
+	if !plan.HasChanges || plan.Summary.Added != 5 || plan.Summary.Removed != 5 || plan.Summary.Modified != 5 {
+		t.Fatalf("stale command convergence plan = %+v", plan)
 	}
 	var planOutput strings.Builder
 	printHookPlan(&planOutput, plan)
@@ -129,28 +181,19 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 		t.Fatalf("unrelated settings changed: %#v", settings["permissions"])
 	}
 
-	wantCommands := map[string]int{
-		string(crosshooks.EventSessionStart):     2,
-		string(crosshooks.EventUserPromptSubmit): 1,
-		string(crosshooks.EventStop):             1,
-		string(crosshooks.EventSessionEnd):       1,
+	wantCommands := map[string]map[string]string{
+		string(crosshooks.EventSessionStart): {
+			invocation + " register --agent claude": "session-start-register",
+			invocation + " hook claude":             "session-start-hook",
+		},
+		string(crosshooks.EventUserPromptSubmit): {invocation + " hook claude": "user-prompt-submit-hook"},
+		string(crosshooks.EventStop):             {invocation + " hook claude": "stop-hook"},
+		string(crosshooks.EventSessionEnd):       {invocation + " unregister --agent claude": "session-end-unregister"},
 	}
-	for event, want := range wantCommands {
-		var owned int
-		for _, entry := range commandEntriesForTest(settings, event) {
-			command, _ := entry["command"].(string)
-			if strings.HasPrefix(command, invocation+" ") {
-				owned++
-				assertNoClaudeMarkerFields(t, entry)
-			}
-		}
-		if owned != want {
-			t.Fatalf("%s has %d agentqueue entries, want %d", event, owned, want)
-		}
-	}
+	assertClaudeOwnedEntries(t, settings, wantCommands)
 
 	entries := commandEntriesForTest(settings, string(crosshooks.EventSessionStart))
-	var foundStartForeign, foundMarkedForeign bool
+	var foundStartForeign, foundMetadataForeign bool
 	for _, entry := range entries {
 		switch entry["command"] {
 		case foreignStart["command"]:
@@ -158,14 +201,14 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 			if entry["vendor"].(map[string]any)["keep"] != true {
 				t.Fatalf("foreign SessionStart entry changed: %#v", entry)
 			}
-		case foreignMarked["command"]:
-			foundMarkedForeign = true
-			if entry[crosshooks.MarkerOwnerField] != foreignMarked[crosshooks.MarkerOwnerField] || entry[crosshooks.MarkerIDField("other-tool")] != foreignMarked[crosshooks.MarkerIDField("other-tool")] {
-				t.Fatalf("foreign marked entry changed: %#v", entry)
+		case foreignMetadata["command"]:
+			foundMetadataForeign = true
+			if entry["provider"] != foreignMetadata["provider"] || entry["hookID"] != foreignMetadata["hookID"] {
+				t.Fatalf("foreign metadata entry changed: %#v", entry)
 			}
 		}
 	}
-	if !foundStartForeign || !foundMarkedForeign {
+	if !foundStartForeign || !foundMetadataForeign {
 		t.Fatalf("foreign SessionStart entries were changed or removed: %#v", entries)
 	}
 	entries = commandEntriesForTest(settings, string(crosshooks.EventStop))
@@ -177,7 +220,7 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.HasChanges || len(second.Unmarked) != 0 {
+	if second.HasChanges || second.Summary.Added != 0 || second.Summary.Removed != 0 || second.Summary.Modified != 0 {
 		t.Fatalf("same-command reinstall is not a no-op: %+v", second)
 	}
 	var secondOutput strings.Builder
@@ -189,7 +232,7 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	}
 }
 
-func TestInstallWritesClaudeHooksWithoutMarkerFields(t *testing.T) {
+func TestInstallWritesClaudeHooksWithSuffixMarkers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	invocation := "/opt/agentqueue"
 	manager, err := claudeConfigManager("user", path, invocation, invocation)
@@ -203,28 +246,25 @@ func TestInstallWritesClaudeHooksWithoutMarkerFields(t *testing.T) {
 	if err := manager.Apply(context.Background(), plan, crosshooks.ApplyOptions{SkipProbe: true}); err != nil {
 		t.Fatal(err)
 	}
-	settings := readJSONSettings(t, path)
-	for _, event := range []string{
-		string(crosshooks.EventSessionStart),
-		string(crosshooks.EventUserPromptSubmit),
-		string(crosshooks.EventStop),
-		string(crosshooks.EventSessionEnd),
-	} {
-		for _, entry := range commandEntriesForTest(settings, event) {
-			assertNoClaudeMarkerFields(t, entry)
-		}
-	}
 
-	printed, err := json.Marshal(hookBlock(claudeHookSpecs(invocation)))
-	if err != nil {
-		t.Fatal(err)
+	want := map[string]map[string]string{
+		string(crosshooks.EventSessionStart): {
+			invocation + " register --agent claude": "session-start-register",
+			invocation + " hook claude":             "session-start-hook",
+		},
+		string(crosshooks.EventUserPromptSubmit): {invocation + " hook claude": "user-prompt-submit-hook"},
+		string(crosshooks.EventStop):             {invocation + " hook claude": "stop-hook"},
+		string(crosshooks.EventSessionEnd):       {invocation + " unregister --agent claude": "session-end-unregister"},
 	}
-	if strings.Contains(string(printed), crosshooks.MarkerOwnerField) || strings.Contains(string(printed), crosshooks.MarkerIDField(agentqueueToolName)) {
-		t.Fatalf("--print block contains Claude marker fields: %s", printed)
-	}
+	settings := readJSONSettings(t, path)
+	assertClaudeOwnedEntries(t, settings, want)
+
+	// --print must produce the same durable command marker, while still using
+	// only Claude's known type and command fields.
+	assertClaudeOwnedEntries(t, hookBlock(claudeHookSpecs(invocation)), want)
 }
 
-func TestInstallAfterClaudeStripsMarkersIsByteIdentical(t *testing.T) {
+func TestInstallAfterClaudeHandEditConvergesLostSuffix(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	invocation := "/opt/agentqueue"
 	manager, err := claudeConfigManager("user", path, invocation, invocation)
@@ -239,57 +279,51 @@ func TestInstallAfterClaudeStripsMarkersIsByteIdentical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate an older install followed by Claude Code rewriting settings and
-	// stripping the unknown marker fields from every entry.
+	// Claude preserves the known type and command fields; there are no unknown
+	// ownership keys to strip. Simulate a hand edit that removes the suffix and
+	// adds a flag to one command.
 	settings := readJSONSettings(t, path)
-	for _, event := range []string{
-		string(crosshooks.EventSessionStart),
-		string(crosshooks.EventUserPromptSubmit),
-		string(crosshooks.EventStop),
-		string(crosshooks.EventSessionEnd),
-	} {
-		for _, entry := range commandEntriesForTest(settings, event) {
-			entry[crosshooks.MarkerOwnerField] = agentqueueToolName
-			entry[crosshooks.MarkerIDField(agentqueueToolName)] = event
-		}
+	entries := commandEntriesForTest(settings, string(crosshooks.EventStop))
+	if len(entries) != 1 {
+		t.Fatalf("Stop entries = %#v, want one", entries)
 	}
-	writeJSONSettings(t, path, settings)
-	for _, event := range []string{
-		string(crosshooks.EventSessionStart),
-		string(crosshooks.EventUserPromptSubmit),
-		string(crosshooks.EventStop),
-		string(crosshooks.EventSessionEnd),
-	} {
-		for _, entry := range commandEntriesForTest(settings, event) {
-			delete(entry, crosshooks.MarkerOwnerField)
-			delete(entry, crosshooks.MarkerIDField(agentqueueToolName))
-		}
+	entry := entries[0]
+	command := assertClaudeCommandEntry(t, entry)
+	clean, _, _, marked := crosshooks.ParseCommandSuffixMarker(command)
+	if !marked {
+		t.Fatalf("fresh Stop command has no suffix: %q", command)
+	}
+	handEdited := clean + " --hand-edited"
+	entry["command"] = handEdited
+	if manager.Ownership == nil || !manager.Ownership(crosshooks.HookEntry{Command: handEdited}) {
+		t.Fatalf("Claude ownership predicate did not recognize hand-edited command %q", handEdited)
 	}
 	writeJSONSettings(t, path, settings)
 
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The Claude manager opts into its command predicate for suffix-less legacy
+	// entries; the actual ownership decision still comes from that predicate.
 	plan, err = manager.PlanInstall()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.HasChanges || len(plan.Unmarked) != 0 || plan.Summary.Added != 0 || plan.Summary.Removed != 0 {
-		t.Fatalf("marker stripping caused install churn: %+v", plan)
+	if !plan.HasChanges || plan.Summary.Added != 1 || plan.Summary.Removed != 1 || plan.Summary.Modified != 1 {
+		t.Fatalf("lost-suffix convergence plan = %+v", plan)
 	}
-	var output strings.Builder
-	if err := applyHookPlan(context.Background(), manager, plan, strings.NewReader(""), &output, true, false, false, true); err != nil {
+	if !strings.Contains(plan.Diff, "#crossagent:v1:") {
+		t.Fatalf("lost-suffix convergence diff lacks a suffix: %s", plan.Diff)
+	}
+	if err := manager.Apply(context.Background(), plan, crosshooks.ApplyOptions{SkipProbe: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got := output.String(); got != "claude: nothing to do\n" {
-		t.Fatalf("marker-stripped reinstall output = %q, want nothing to do", got)
-	}
-	after, err := os.ReadFile(path)
+
+	assertClaudeOwnedEntries(t, readJSONSettings(t, path), map[string]map[string]string{
+		string(crosshooks.EventStop): {handEdited: "stop-hook"},
+	})
+	second, err := manager.PlanInstall()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != string(before) {
-		t.Fatalf("marker-stripped reinstall changed file bytes:\nbefore=%q\nafter=%q", before, after)
+	if second.HasChanges || second.Summary.Added != 0 || second.Summary.Removed != 0 || second.Summary.Modified != 0 {
+		t.Fatalf("lost-suffix convergence did not settle: %+v", second)
 	}
 }

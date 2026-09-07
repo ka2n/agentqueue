@@ -23,8 +23,7 @@ const (
 )
 
 // claudeHookSpecs is the complete agentqueue integration for Claude. The IDs
-// are part of the crossagent declaration, but Claude settings do not persist
-// the marker fields that would store them.
+// are stable so crossagent can encode ownership in each command suffix.
 func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 	return []crosshooks.HookSpec{
 		{Event: crosshooks.EventSessionStart, Command: invocation + " register --agent claude", ID: "session-start-register"},
@@ -35,14 +34,14 @@ func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 	}
 }
 
-// hookBlock is used only for --print. Configuration mutation itself is wholly
-// delegated to crossagent's plan-first ConfigManager.
+// hookBlock is used only for --print. It mirrors ConfigManager's suffix-marked
+// entries so a pasted block remains identifiable on a later install.
 func hookBlock(specs []crosshooks.HookSpec) map[string]any {
 	byEvent := make(map[string][]any)
 	for _, spec := range specs {
 		entry := map[string]any{
 			"type":    "command",
-			"command": spec.Command,
+			"command": crosshooks.BuildCommandSuffixMarker(spec.Command, agentqueueToolName, spec.ID),
 		}
 		event := string(spec.Event)
 		byEvent[event] = append(byEvent[event], entry)
@@ -132,14 +131,15 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 		return crosshooks.ConfigManager{}, err
 	}
 	manager := crosshooks.ConfigManager{
-		Resolver:     paths.DefaultResolver(),
-		Agent:        crosshooks.AgentClaude,
-		Scope:        scopeValue,
-		CWD:          cwd,
-		SettingsPath: strings.TrimSpace(settings),
-		ToolName:     agentqueueToolName,
-		Invocation:   invocation,
-		Ownership:    crosshooks.DefaultOwnershipPredicate(agentqueueToolName),
+		Resolver:      paths.DefaultResolver(),
+		Agent:         crosshooks.AgentClaude,
+		Scope:         scopeValue,
+		CWD:           cwd,
+		SettingsPath:  strings.TrimSpace(settings),
+		ToolName:      agentqueueToolName,
+		Invocation:    invocation,
+		Ownership:     crosshooks.DefaultOwnershipPredicate(agentqueueToolName),
+		AdoptUnmarked: true,
 	}
 	if strings.TrimSpace(invocation) != "" {
 		manager.Hooks = claudeHookSpecs(invocation)
@@ -321,7 +321,7 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]",
-		"Install Claude hooks through crossagent's safety-checked, plan-first configuration manager. Claude ownership is determined by the agentqueue command predicate, and other tools' hooks are preserved. Claude settings entries are written without ownership-marker fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
+		"Install Claude hooks through crossagent's safety-checked, plan-first configuration manager. Claude commands carry a suffix ownership marker in the known command field, and other tools' hooks are preserved without extra JSON ownership fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
 	}
