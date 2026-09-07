@@ -85,12 +85,12 @@ func assertClaudeSuffix(t *testing.T, entry map[string]any, wantClean, wantID st
 
 func assertClaudeOwnedEntries(t *testing.T, settings map[string]any, want map[string]map[string]string) {
 	t.Helper()
-	owns := crosshooks.DefaultOwnershipPredicate(agentqueueToolName)
+	owns := crosshooks.MatchBasename(agentqueueToolName)
 	for event, expected := range want {
 		found := make(map[string]int)
 		for _, entry := range commandEntriesForTest(settings, event) {
 			command, ok := entry["command"].(string)
-			if !ok || !owns(crosshooks.HookEntry{Command: command}) {
+			if !ok || !owns.Match(crosshooks.HookEntry{Command: command}) {
 				continue
 			}
 			clean, owner, _, marked := crosshooks.ParseCommandSuffixMarker(command)
@@ -125,6 +125,13 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	foreignStop := map[string]any{
 		"type": "command", "command": "other-tool finish", "async": true,
 	}
+	// Env-wrapped commands are never recognized as agentqueue's own, even
+	// when the wrapped command names agentqueue: the strict default matcher
+	// does not unwrap `env VAR=value ...`, and agentqueue does not opt into
+	// MatchEnvWrapped.
+	foreignEnvWrapped := map[string]any{
+		"type": "command", "command": "env X=1 agentqueue hook claude",
+	}
 	writeJSONSettings(t, path, map[string]any{
 		"permissions": map[string]any{"allow": []any{"Read"}},
 		"hooks": map[string]any{
@@ -145,6 +152,7 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 				"hooks": []any{
 					map[string]any{"type": "command", "command": crosshooks.BuildCommandSuffixMarker(old+" hook claude", agentqueueToolName, "stop-hook")},
 					foreignStop,
+					foreignEnvWrapped,
 				},
 			}},
 			"SessionEnd": []any{map[string]any{
@@ -212,8 +220,11 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 		t.Fatalf("foreign SessionStart entries were changed or removed: %#v", entries)
 	}
 	entries = commandEntriesForTest(settings, string(crosshooks.EventStop))
-	if len(entries) != 2 || entries[1]["command"] != foreignStop["command"] || entries[1]["async"] != true {
+	if len(entries) != 3 || entries[1]["command"] != foreignStop["command"] || entries[1]["async"] != true {
 		t.Fatalf("foreign Stop entry changed or removed: %#v", entries)
+	}
+	if entries[2]["command"] != foreignEnvWrapped["command"] {
+		t.Fatalf("env-wrapped foreign Stop entry changed or removed: %#v", entries)
 	}
 
 	second, err := manager.PlanInstall()
@@ -295,13 +306,18 @@ func TestInstallAfterClaudeHandEditConvergesLostSuffix(t *testing.T) {
 	}
 	handEdited := clean + " --hand-edited"
 	entry["command"] = handEdited
-	if manager.Ownership == nil || !manager.Ownership(crosshooks.HookEntry{Command: handEdited}) {
-		t.Fatalf("Claude ownership predicate did not recognize hand-edited command %q", handEdited)
+	matcher := manager.Matcher
+	if matcher == nil {
+		matcher = crosshooks.MatchBasename(agentqueueToolName)
+	}
+	if !matcher.Match(crosshooks.HookEntry{Command: handEdited}) {
+		t.Fatalf("Claude ownership matcher did not recognize hand-edited command %q", handEdited)
 	}
 	writeJSONSettings(t, path, settings)
 
-	// The Claude manager opts into its command predicate for suffix-less legacy
-	// entries; the actual ownership decision still comes from that predicate.
+	// The Claude manager falls back to MatchBasename for suffix-less legacy
+	// entries; convergence then writes the declared HookSpec.Command
+	// verbatim, discarding the hand-edited flag rather than preserving it.
 	plan, err = manager.PlanInstall()
 	if err != nil {
 		t.Fatal(err)
@@ -317,7 +333,7 @@ func TestInstallAfterClaudeHandEditConvergesLostSuffix(t *testing.T) {
 	}
 
 	assertClaudeOwnedEntries(t, readJSONSettings(t, path), map[string]map[string]string{
-		string(crosshooks.EventStop): {handEdited: "stop-hook"},
+		string(crosshooks.EventStop): {invocation + " hook claude": "stop-hook"},
 	})
 	second, err := manager.PlanInstall()
 	if err != nil {

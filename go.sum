@@ -10,3 +10,5 @@ github.com/ka2n/crossagent v0.0.0-20260906112339-9910941344e6 h1:2gQ0teu4VZKfpNs
 github.com/ka2n/crossagent v0.0.0-20260906112339-9910941344e6/go.mod h1:vAG57CMZooQpa111w3EMsw3ftn22zjNZn8cen2yah1A=
 github.com/ka2n/crossagent v0.0.0-20260907112718-fa129bf89a0c h1:UrOX7A1p3tGGSvR01wuWxw2JFKM0FFJSyFpglHo/ito=
 github.com/ka2n/crossagent v0.0.0-20260907112718-fa129bf89a0c/go.mod h1:vAG57CMZooQpa111w3EMsw3ftn22zjNZn8cen2yah1A=
+github.com/ka2n/crossagent v0.0.0-20260907143643-e4f53d36b1a3 h1:7/SmjLzyHlQw26dfSq1hukkGsxozeeev0H9KuDLOjRI=
+github.com/ka2n/crossagent v0.0.0-20260907143643-e4f53d36b1a3/go.mod h1:vAG57CMZooQpa111w3EMsw3ftn22zjNZn8cen2yah1A=

@@ -131,14 +131,17 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 		return crosshooks.ConfigManager{}, err
 	}
 	manager := crosshooks.ConfigManager{
-		Resolver:      paths.DefaultResolver(),
-		Agent:         crosshooks.AgentClaude,
-		Scope:         scopeValue,
-		CWD:           cwd,
-		SettingsPath:  strings.TrimSpace(settings),
-		ToolName:      agentqueueToolName,
-		Invocation:    invocation,
-		Ownership:     crosshooks.DefaultOwnershipPredicate(agentqueueToolName),
+		Resolver:     paths.DefaultResolver(),
+		Agent:        crosshooks.AgentClaude,
+		Scope:        scopeValue,
+		CWD:          cwd,
+		SettingsPath: strings.TrimSpace(settings),
+		ToolName:     agentqueueToolName,
+		Invocation:   invocation,
+		// Matcher left as the zero value: MatchBasename(ToolName), the
+		// strict default. agentqueue must not opt into MatchEnvWrapped -- an
+		// env-wrapped command belongs to a different tool and must be left
+		// alone.
 		AdoptUnmarked: true,
 	}
 	if strings.TrimSpace(invocation) != "" {
