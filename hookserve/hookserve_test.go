@@ -292,3 +292,67 @@ func TestSelfCheck(t *testing.T) {
 		t.Fatalf("SelfCheck wrote %q, want %q", b.String(), SelfCheckToken)
 	}
 }
+
+func TestRenderDeliveryDefaultAckLine(t *testing.T) {
+	q := openQueue(t)
+	target := agentqueue.Target{Agent: "claude", Name: "s1"}
+	item, err := q.Push(target, "hello", nil)
+	if err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	got := RenderDelivery(q, target, []agentqueue.Item{*item})
+	want := "Acknowledge each one after acting on it: agentqueue ack --to claude:s1 <id>"
+	if !strings.Contains(got, want) {
+		t.Fatalf("RenderDelivery missing default ack line %q:\n%s", want, got)
+	}
+}
+
+func TestHandleClaudeUsesQueueAckCmd(t *testing.T) {
+	q, err := agentqueue.Open(t.TempDir(), agentqueue.WithAckCmd(func(target agentqueue.Target, id string) string {
+		return "jill queue ack --to " + target.String() + " " + id
+	}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	target := agentqueue.Target{Agent: "claude", Name: "s1"}
+	if _, err := q.Push(target, "hello", nil); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	out, delivered, err := HandleClaude(q, Payload{HookEventName: "UserPromptSubmit", SessionID: "s1"}, Options{Getenv: noEnv})
+	if err != nil || !delivered || out == nil || out.HookSpecificOutput == nil {
+		t.Fatalf("HandleClaude: err=%v delivered=%v out=%+v", err, delivered, out)
+	}
+	ctx := out.HookSpecificOutput.AdditionalContext
+	want := "Acknowledge each one after acting on it: jill queue ack --to claude:s1 <id>"
+	if !strings.Contains(ctx, want) {
+		t.Fatalf("additionalContext missing custom ack line %q:\n%s", want, ctx)
+	}
+	if strings.Contains(ctx, "agentqueue ack") {
+		t.Fatalf("additionalContext still names the default ack command:\n%s", ctx)
+	}
+}
+
+// A queue customized only for fetch still renders the default ack wording: the
+// two customizations are independent through the hookserve rendering path too.
+func TestHandleClaudeAckIndependentOfFetch(t *testing.T) {
+	q, err := agentqueue.Open(t.TempDir(), agentqueue.WithFetchCmd(func(target agentqueue.Target) string {
+		return "jill queue take --to " + target.String() + " --next"
+	}))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	target := agentqueue.Target{Agent: "claude", Name: "s1"}
+	if _, err := q.Push(target, "hello", nil); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	out, delivered, err := HandleClaude(q, Payload{HookEventName: "UserPromptSubmit", SessionID: "s1"}, Options{Getenv: noEnv})
+	if err != nil || !delivered || out == nil || out.HookSpecificOutput == nil {
+		t.Fatalf("HandleClaude: err=%v delivered=%v out=%+v", err, delivered, out)
+	}
+	ctx := out.HookSpecificOutput.AdditionalContext
+	want := "Acknowledge each one after acting on it: agentqueue ack --to claude:s1 <id>"
+	if !strings.Contains(ctx, want) {
+		t.Fatalf("additionalContext missing default ack line %q:\n%s", want, ctx)
+	}
+}

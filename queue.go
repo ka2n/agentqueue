@@ -27,6 +27,7 @@ type Queue struct {
 	root     string
 	now      func() time.Time
 	fetchCmd func(Target) string
+	ackCmd   func(Target, string) string
 
 	mu           sync.RWMutex
 	pollInterval time.Duration
@@ -43,6 +44,22 @@ func WithFetchCmd(fn func(Target) string) Option {
 	return func(q *Queue) {
 		if fn != nil {
 			q.fetchCmd = fn
+		}
+	}
+}
+
+// WithAckCmd sets how the queue renders the command an agent runs to
+// acknowledge an item after acting on it. The rendered string is what a
+// delivery notice tells the agent to run, so a program embedding this library
+// should point it at its own CLI. The default is
+// "agentqueue ack --to <target> <id>".
+//
+// Unlike WithFetchCmd, the function also takes the item id: an ack names the
+// specific item being acknowledged, whereas a fetch claims the next pending one.
+func WithAckCmd(fn func(t Target, id string) string) Option {
+	return func(q *Queue) {
+		if fn != nil {
+			q.ackCmd = fn
 		}
 	}
 }
@@ -68,6 +85,11 @@ func defaultFetchCmd(t Target) string {
 	return fmt.Sprintf("agentqueue take --to %s --next", t)
 }
 
+// defaultAckCmd renders the standalone CLI's ack command.
+func defaultAckCmd(t Target, id string) string {
+	return fmt.Sprintf("agentqueue ack --to %s %s", t, id)
+}
+
 // Open prepares root as a queue directory, creating it if needed.
 func Open(root string, opts ...Option) (*Queue, error) {
 	if strings.TrimSpace(root) == "" {
@@ -84,6 +106,7 @@ func Open(root string, opts ...Option) (*Queue, error) {
 		root:         abs,
 		now:          time.Now,
 		fetchCmd:     defaultFetchCmd,
+		ackCmd:       defaultAckCmd,
 		pollInterval: defaultPollInterval,
 	}
 	for _, opt := range opts {
@@ -101,6 +124,14 @@ func (q *Queue) FetchCmd(t Target) string {
 		return defaultFetchCmd(t)
 	}
 	return q.fetchCmd(t)
+}
+
+// AckCmd is the command an agent runs to acknowledge item id for t.
+func (q *Queue) AckCmd(t Target, id string) string {
+	if q.ackCmd == nil {
+		return defaultAckCmd(t, id)
+	}
+	return q.ackCmd(t, id)
 }
 
 func (q *Queue) poll() time.Duration {

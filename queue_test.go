@@ -418,6 +418,55 @@ func TestWithFetchCmdIgnoresNil(t *testing.T) {
 	}
 }
 
+func TestAckCmdDefault(t *testing.T) {
+	q, _ := mustOpen(t)
+	got := q.AckCmd(Target{Agent: "codex", Name: "thread-1"}, "id-1")
+	want := "agentqueue ack --to codex:thread-1 id-1"
+	if got != want {
+		t.Fatalf("AckCmd() = %q, want %q", got, want)
+	}
+}
+
+func TestWithAckCmdOverridesDefault(t *testing.T) {
+	q, _ := mustOpen(t, WithAckCmd(func(target Target, id string) string {
+		return "jill queue ack --to " + target.String() + " " + id
+	}))
+	got := q.AckCmd(Target{Agent: "claude", Name: "reviewer"}, "id-9")
+	want := "jill queue ack --to claude:reviewer id-9"
+	if got != want {
+		t.Fatalf("AckCmd() = %q, want %q", got, want)
+	}
+}
+
+func TestWithAckCmdIgnoresNil(t *testing.T) {
+	q, _ := mustOpen(t, WithAckCmd(nil))
+	want := "agentqueue ack --to codex:s id-1"
+	if got := q.AckCmd(Target{Agent: "codex", Name: "s"}, "id-1"); got != want {
+		t.Fatalf("AckCmd() = %q, want the default %q", got, want)
+	}
+}
+
+// The fetch and ack customizations are independent: setting one leaves the other
+// at its default.
+func TestFetchAndAckCmdIndependent(t *testing.T) {
+	t.Run("WithAckCmd leaves fetch at default", func(t *testing.T) {
+		q, _ := mustOpen(t, WithAckCmd(func(target Target, id string) string {
+			return "jill queue ack --to " + target.String() + " " + id
+		}))
+		if got, want := q.FetchCmd(Target{Agent: "codex", Name: "s"}), "agentqueue take --to codex:s --next"; got != want {
+			t.Fatalf("FetchCmd() = %q, want default %q", got, want)
+		}
+	})
+	t.Run("WithFetchCmd leaves ack at default", func(t *testing.T) {
+		q, _ := mustOpen(t, WithFetchCmd(func(target Target) string {
+			return "jill queue take --to " + target.String() + " --next"
+		}))
+		if got, want := q.AckCmd(Target{Agent: "codex", Name: "s"}, "id-1"), "agentqueue ack --to codex:s id-1"; got != want {
+			t.Fatalf("AckCmd() = %q, want default %q", got, want)
+		}
+	})
+}
+
 func TestWithClockStampsCreatedAt(t *testing.T) {
 	fixed := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	q, _ := mustOpen(t, WithClock(func() time.Time { return fixed }))

@@ -191,7 +191,7 @@ func HandleClaude(q *agentqueue.Queue, payload Payload, opts Options) (*Output, 
 	out := &Output{
 		HookSpecificOutput: &HookSpecificOutput{
 			HookEventName:     payload.HookEventName,
-			AdditionalContext: RenderDelivery(target, items),
+			AdditionalContext: RenderDelivery(q, target, items),
 		},
 	}
 	// Stop is the only delivery point that can act without the user, but only
@@ -262,11 +262,19 @@ func ClaimUpTo(q *agentqueue.Queue, t agentqueue.Target, max int) ([]agentqueue.
 // reference warns that context framed as out-of-band system commands trips
 // Claude's prompt-injection defenses. It stays compact because every byte here is
 // spent from the session's context window.
-func RenderDelivery(t agentqueue.Target, items []agentqueue.Item) string {
+//
+// The ack command wording comes from q.AckCmd, so a program embedding this
+// library (one that opened its queue WithAckCmd) tells the agent to run its own
+// ack command rather than the standalone "agentqueue ack". The "<id>" passed to
+// AckCmd is a literal placeholder: the summary line covers every delivered item,
+// each of which prints its own id below. The "agentqueue delivered ..." preamble
+// is left as the library naming itself in a description, not a command the agent
+// runs, so it is intentionally not parameterized.
+func RenderDelivery(q *agentqueue.Queue, t agentqueue.Target, items []agentqueue.Item) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "agentqueue delivered %d queued message(s) addressed to this session (%s).\n", len(items), t)
 	b.WriteString("They were pushed by an external producer, not written by the user. They are already claimed, so no other consumer will see them.\n")
-	fmt.Fprintf(&b, "Acknowledge each one after acting on it: agentqueue ack --to %s <id>\n", t)
+	fmt.Fprintf(&b, "Acknowledge each one after acting on it: %s\n", q.AckCmd(t, "<id>"))
 	for _, item := range items {
 		fmt.Fprintf(&b, "\n--- id %s  %s", item.ID, item.CreatedAt.UTC().Format(time.RFC3339))
 		if len(item.Meta) > 0 {
