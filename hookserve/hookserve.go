@@ -143,9 +143,9 @@ func ParsePayload(r io.Reader) (Payload, error) {
 // It claims items (TakeNext), it does not merely read them: claiming is what
 // makes delivery exactly-once when several hooks are installed at the same time.
 //
-// On SessionStart it first records the session's address so a producer reacting
-// to the injected context can already address the session, then, unless the
-// source is compaction, delivers. Compaction rebuilds the context of a running
+// SessionStart, UserPromptSubmit and Stop refresh the address so a producer reacting
+// to the injected context can already address the session. Unless the
+// SessionStart source is compaction, delivery follows. Compaction rebuilds a running
 // session, where an injection would land outside any turn and be consumed
 // invisibly, so nothing is delivered there.
 func HandleClaude(q *agentqueue.Queue, payload Payload, opts Options) (*Output, bool, error) {
@@ -166,13 +166,12 @@ func HandleClaude(q *agentqueue.Queue, payload Payload, opts Options) (*Output, 
 		return nil, false, nil
 	}
 
-	if payload.HookEventName == eventSessionStart {
-		// Record the address before delivering, so a producer that reacts to
-		// the injected context can already address this session.
+	if payload.HookEventName != eventSubagentStop {
+		// SubagentStop carries the parent cwd, which cannot describe a child checkout.
 		if err := RegisterAddress(q, target, payload, getenv); err != nil {
 			opts.logf("register %s: %v", target, err)
 		}
-		if payload.Source == sourceCompact {
+		if payload.HookEventName == eventSessionStart && payload.Source == sourceCompact {
 			// Compaction is rebuilding the context of a session that is
 			// already running. Injecting a queued message there would land it
 			// outside any turn and consume it invisibly.

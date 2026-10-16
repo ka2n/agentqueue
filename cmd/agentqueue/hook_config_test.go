@@ -172,7 +172,7 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	if plan.Style != crosshooks.MarkerStyleCommandSuffix {
 		t.Fatalf("Claude auto marker style = %q, want command suffix", plan.Style)
 	}
-	if !plan.HasChanges || plan.Summary.Added != 5 || plan.Summary.Removed != 5 || plan.Summary.Modified != 5 {
+	if !plan.HasChanges || plan.Summary.Added != 4 || plan.Summary.Removed != 5 || plan.Summary.Modified != 4 {
 		t.Fatalf("stale command convergence plan = %+v", plan)
 	}
 	var planOutput strings.Builder
@@ -191,8 +191,7 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 
 	wantCommands := map[string]map[string]string{
 		string(crosshooks.EventSessionStart): {
-			invocation + " register --agent claude": "session-start-register",
-			invocation + " hook claude":             "session-start-hook",
+			invocation + " hook claude": "session-start-hook",
 		},
 		string(crosshooks.EventUserPromptSubmit): {invocation + " hook claude": "user-prompt-submit-hook"},
 		string(crosshooks.EventStop):             {invocation + " hook claude": "stop-hook"},
@@ -260,8 +259,7 @@ func TestInstallWritesClaudeHooksWithSuffixMarkers(t *testing.T) {
 
 	want := map[string]map[string]string{
 		string(crosshooks.EventSessionStart): {
-			invocation + " register --agent claude": "session-start-register",
-			invocation + " hook claude":             "session-start-hook",
+			invocation + " hook claude": "session-start-hook",
 		},
 		string(crosshooks.EventUserPromptSubmit): {invocation + " hook claude": "user-prompt-submit-hook"},
 		string(crosshooks.EventStop):             {invocation + " hook claude": "stop-hook"},
@@ -341,5 +339,69 @@ func TestInstallAfterClaudeHandEditConvergesLostSuffix(t *testing.T) {
 	}
 	if second.HasChanges || second.Summary.Added != 0 || second.Summary.Removed != 0 || second.Summary.Modified != 0 {
 		t.Fatalf("lost-suffix convergence did not settle: %+v", second)
+	}
+}
+
+func TestCodexMetadataHooksPreserveOtherToolsAndUninstall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	foreign := map[string]any{"type": "command", "command": "other-tool stop"}
+	writeJSONSettings(t, path, map[string]any{
+		"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{foreign}}}},
+	})
+	manager, err := agentConfigManager(crosshooks.AgentCodex, "user", path, "agentqueue", "agentqueue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := manager.PlanInstall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Apply(context.Background(), plan, crosshooks.ApplyOptions{SkipProbe: true}); err != nil {
+		t.Fatal(err)
+	}
+	settings := readJSONSettings(t, path)
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
+		found := false
+		for _, entry := range commandEntriesForTest(settings, event) {
+			command, _ := entry["command"].(string)
+			if strings.HasPrefix(command, "agentqueue ") {
+				found = true
+				if event != "SessionEnd" && !strings.Contains(command, "register --agent codex --quiet") {
+					t.Fatalf("%s is not a quiet metadata refresh: %q", event, command)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing Codex metadata hook for %s", event)
+		}
+	}
+	second, err := manager.PlanInstall()
+	if err != nil || second.HasChanges {
+		t.Fatalf("repeat install: changed=%v err=%v", second.HasChanges, err)
+	}
+	manager.Hooks, manager.Probe = nil, nil
+	remove, err := manager.PlanUninstall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Apply(context.Background(), remove, crosshooks.ApplyOptions{SkipProbe: true}); err != nil {
+		t.Fatal(err)
+	}
+	entries := commandEntriesForTest(readJSONSettings(t, path), "Stop")
+	if len(entries) != 1 || entries[0]["command"] != "other-tool stop" {
+		t.Fatalf("foreign hook not preserved: %#v", entries)
+	}
+}
+
+func TestPrintCodexAliasAndRejectUnknownAgent(t *testing.T) {
+	var output strings.Builder
+	if err := cmdInstall(context.Background(), []string{"--print", "--agent", "codex-cli"}, strings.NewReader(""), &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "register --agent codex --quiet") || strings.Contains(output.String(), "hook claude") || strings.Contains(output.String(), "#crossagent") {
+		t.Fatalf("incorrect Codex print config: %s", output.String())
+	}
+	if err := cmdInstall(context.Background(), []string{"--print", "--agent", "unknown"}, strings.NewReader(""), &output, &output); err == nil {
+		t.Fatal("unknown agent accepted")
 	}
 }

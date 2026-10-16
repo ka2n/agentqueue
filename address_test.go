@@ -205,3 +205,38 @@ func TestMailboxesCountsStatesAndSkipsIndex(t *testing.T) {
 		t.Fatalf("Mailboxes(codex) = %+v, want the one codex mailbox", only)
 	}
 }
+
+func TestConcurrentAddressUpdatesAndCwdMoves(t *testing.T) {
+	q, root := mustOpen(t)
+	target := Target{Agent: "claude", Name: "moving"}
+	if err := q.PutAddress(Address{Agent: target.Agent, Name: target.Name, Cwd: "/old"}); err != nil {
+		t.Fatal(err)
+	}
+	failures := make(chan error, 40)
+	for range 40 {
+		go func() { failures <- q.PutAddress(Address{Agent: target.Agent, Name: target.Name, Cwd: "/new"}) }()
+	}
+	for range 40 {
+		if err := <-failures; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for cwd, want := range map[string]int{"/old": 0, "/new": 1} {
+		found, err := q.TargetsByCwd("claude", cwd)
+		if err != nil || len(found) != want {
+			t.Fatalf("%s: %v %v", cwd, found, err)
+		}
+	}
+	addr, err := q.Address(target)
+	if err != nil || addr.Cwd != "/new" {
+		t.Fatalf("address: %v %v", addr, err)
+	}
+	info, err := os.Stat(filepath.Join(root, "claude", "moving", addrFileName))
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("permissions: %v %v", info, err)
+	}
+	files, err := os.ReadDir(filepath.Join(root, "claude", "moving", tmpDirName))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("temporary files: %v %v", files, err)
+	}
+}

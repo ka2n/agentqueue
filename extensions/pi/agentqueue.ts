@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { spawn } from "node:child_process";
 import { mkdir, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,6 +9,7 @@ const MAX_ITEMS_PER_DRAIN = 5;
 const DRAIN_DEBOUNCE_MS = 50;
 const WATCH_RETRY_MS = 1000;
 const TAKE_TIMEOUT_MS = 5000;
+const REGISTRATION_TIMEOUT_MS = 1000;
 const MESSAGE_TYPE = "agentqueue";
 
 type QueueItem = {
@@ -181,6 +183,32 @@ async function pendingCount(pendingDir: string): Promise<number> {
 	}
 }
 
+async function updateRegistration(runtime: Runtime, event: string, unregister = false): Promise<void> {
+	try {
+		await new Promise<void>((done) => {
+			const args = [unregister ? "unregister" : "register", "--agent", "pi", "--to", runtime.target];
+			if (!unregister) args.push("--quiet");
+			const child = spawn("agentqueue", args, {
+				cwd: runtime.ctx.cwd,
+				env: { ...process.env, AGENTQUEUE_ROOT: runtime.root },
+				stdio: ["pipe", "ignore", "ignore"],
+				timeout: REGISTRATION_TIMEOUT_MS,
+				killSignal: "SIGKILL",
+			});
+			child.on("error", () => done());
+			child.on("close", () => done());
+			child.stdin.on("error", () => {});
+			child.stdin.end(JSON.stringify({
+				session_id: runtime.target.slice(3),
+				cwd: runtime.ctx.cwd,
+				hook_event_name: event,
+			}));
+		});
+	} catch {
+		// Metadata must not interrupt session startup or mailbox delivery.
+	}
+}
+
 async function stopRuntime(runtime: Runtime | undefined): Promise<void> {
 	if (!runtime) return;
 	runtime.active = false;
@@ -189,6 +217,7 @@ async function stopRuntime(runtime: Runtime | undefined): Promise<void> {
 	if (runtime.watchRetryTimer !== undefined) clearTimeout(runtime.watchRetryTimer);
 	runtime.drainTimer = undefined;
 	runtime.watchRetryTimer = undefined;
+	await updateRegistration(runtime, "session_shutdown", true);
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -226,11 +255,24 @@ export default function (pi: ExtensionAPI): void {
 			draining: false,
 			drainAgain: false,
 		};
+		await updateRegistration(runtime, "session_start");
 		await ensureWatcher(runtime);
 		// Let startup finish before triggering a turn. In print mode the initial
 		// prompt may already be starting when session_start returns.
 		requestDrain(runtime, 0);
 		notify(ctx, `agentqueue watching ${runtime.pendingDir}`);
+	});
+
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (!runtime?.active) return;
+		runtime.ctx = ctx;
+		await updateRegistration(runtime, "before_agent_start");
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		if (!runtime?.active) return;
+		runtime.ctx = ctx;
+		await updateRegistration(runtime, "agent_settled");
 	});
 
 	pi.on("session_shutdown", async () => {

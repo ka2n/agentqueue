@@ -49,3 +49,10 @@ session mailbox for new files. It never reads item bodies directly from the
 filesystem: `agentqueue take --next --json` claims them first, which prevents
 multiple consumers from receiving the same item. At most five items are injected
 per drain, and bursts are debounced.
+
+The extension registers the current session at startup and refreshes its working
+directory and Git context before each agent turn and when a turn ends. This makes
+Pi sessions and their last observed worktree path, branch, HEAD, and optional
+Herdr context visible in `agentqueue sessions`. Registration uses the CLI without
+a shell and is removed on shutdown; a failed metadata refresh does not stop
+mailbox delivery.

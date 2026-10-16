@@ -54,8 +54,7 @@ func cmdRegister(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	addr := hookserve.AddressFor(target, in, os.Getenv, os.Getppid())
-	if err := q.PutAddress(addr); err != nil {
+	if err := hookserve.RegisterAddress(q, target, in, os.Getenv); err != nil {
 		return err
 	}
 	if *asJSON {
