@@ -27,7 +27,6 @@ const (
 // are stable so crossagent can encode ownership in each command suffix.
 func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 	return []crosshooks.HookSpec{
-		{Event: crosshooks.EventSessionStart, Command: invocation + " register --agent claude", ID: "session-start-register"},
 		{Event: crosshooks.EventSessionStart, Command: invocation + " hook claude", ID: "session-start-hook"},
 		{Event: crosshooks.EventUserPromptSubmit, Command: invocation + " hook claude", ID: "user-prompt-submit-hook"},
 		{Event: crosshooks.EventStop, Command: invocation + " hook claude", ID: "stop-hook"},
@@ -35,14 +34,30 @@ func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 	}
 }
 
+func codexHookSpecs(invocation string) []crosshooks.HookSpec {
+	return []crosshooks.HookSpec{
+		{Event: crosshooks.EventSessionStart, Command: invocation + " register --agent codex --quiet", ID: "session-start-register"},
+		{Event: crosshooks.EventUserPromptSubmit, Command: invocation + " register --agent codex --quiet", ID: "user-prompt-submit-register"},
+		{Event: crosshooks.EventStop, Command: invocation + " register --agent codex --quiet", ID: "stop-register"},
+		{Event: crosshooks.EventSessionEnd, Command: invocation + " unregister --agent codex", ID: "session-end-unregister"},
+	}
+}
+
 // hookBlock is used only for --print. It mirrors ConfigManager's suffix-marked
 // entries so a pasted block remains identifiable on a later install.
 func hookBlock(specs []crosshooks.HookSpec) map[string]any {
+	return hookBlockForAgent(crosshooks.AgentClaude, specs)
+}
+
+func hookBlockForAgent(agent crossagent.Name, specs []crosshooks.HookSpec) map[string]any {
 	byEvent := make(map[string][]any)
 	for _, spec := range specs {
 		entry := map[string]any{
 			"type":    "command",
 			"command": crosshooks.BuildCommandSuffixMarker(spec.Command, agentqueueToolName, spec.ID),
+		}
+		if agent == crosshooks.AgentCodex {
+			entry["command"] = spec.Command
 		}
 		event := string(spec.Event)
 		byEvent[event] = append(byEvent[event], entry)
@@ -123,6 +138,10 @@ func currentWorkingDirectory() (string, error) {
 }
 
 func claudeConfigManager(scope, settings, invocation, executable string) (crosshooks.ConfigManager, error) {
+	return agentConfigManager(crosshooks.AgentClaude, scope, settings, invocation, executable)
+}
+
+func agentConfigManager(agent crossagent.Name, scope, settings, invocation, executable string) (crosshooks.ConfigManager, error) {
 	scopeValue, err := parseHookScope(scope)
 	if err != nil {
 		return crosshooks.ConfigManager{}, err
@@ -133,7 +152,7 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 	}
 	manager := crosshooks.ConfigManager{
 		Resolver:     paths.DefaultResolver(),
-		Agent:        crosshooks.AgentClaude,
+		Agent:        agent,
 		Scope:        scopeValue,
 		CWD:          cwd,
 		SettingsPath: strings.TrimSpace(settings),
@@ -152,6 +171,9 @@ func claudeConfigManager(scope, settings, invocation, executable string) (crossh
 			ExpectedToken: hookserve.SelfCheckToken,
 			Timeout:       selfCheckTimeout,
 		}
+	}
+	if agent == crosshooks.AgentCodex {
+		manager.Hooks = codexHookSpecs(invocation)
 	}
 	return manager, nil
 }
@@ -233,9 +255,9 @@ func applyHookPlan(ctx context.Context, manager crosshooks.ConfigManager, plan c
 		}
 	}
 	if plan.Operation == crosshooks.Install {
-		fmt.Fprintf(stdout, "claude: installed hooks into %s (backup: %s)\n", plan.Path, plan.BackupPath)
+		fmt.Fprintf(stdout, "%s: installed hooks into %s (backup: %s)\n", plan.Agent, plan.Path, plan.BackupPath)
 	} else {
-		fmt.Fprintf(stdout, "claude: removed hooks from %s\n", plan.Path)
+		fmt.Fprintf(stdout, "%s: removed hooks from %s\n", plan.Agent, plan.Path)
 	}
 	return nil
 }
@@ -284,7 +306,7 @@ func chooseInstallAgents(ctx context.Context, requested string, stdin io.Reader,
 	printDetectedAgents(stdout, agents)
 	var installable []crossagent.Agent
 	for _, agent := range agents {
-		if agent.Found && agent.Name == crosshooks.AgentClaude {
+		if agent.Found && (agent.Name == crosshooks.AgentClaude || agent.Name == crosshooks.AgentCodex) {
 			installable = append(installable, agent)
 		}
 	}
@@ -295,10 +317,10 @@ func chooseInstallAgents(ctx context.Context, requested string, stdin io.Reader,
 		if yes || dryRun || diffOnly {
 			return installable, nil
 		}
-		fmt.Fprintln(stdout, "Not a terminal, so nothing was written. Pass --agent claude or --yes to choose Claude.")
+		fmt.Fprintln(stdout, "Not a terminal, so nothing was written. Pass --agent AGENT or --yes to choose integrations.")
 		return nil, nil
 	}
-	fmt.Fprint(stdout, "Set up Claude hooks? [y/N] ")
+	fmt.Fprint(stdout, "Set up detected agent hooks? [y/N] ")
 	line, err := readLine(stdin)
 	if err != nil {
 		return nil, err
@@ -325,7 +347,7 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]",
-		"Install Claude hooks through crossagent's safety-checked, plan-first configuration manager. Claude commands carry a suffix ownership marker in the known command field, and other tools' hooks are preserved without extra JSON ownership fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
+		"Install Claude delivery hooks or Codex metadata hooks through crossagent's safety-checked, plan-first configuration manager. Claude commands carry a suffix ownership marker in the known command field, and other tools' hooks are preserved without extra JSON ownership fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
 	}
@@ -338,6 +360,19 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 		return err
 	}
 	if *printer {
+		name := crosshooks.AgentClaude
+		if strings.TrimSpace(*agentFlag) != "" {
+			name, err = parseAgent(*agentFlag)
+			if err != nil {
+				return err
+			}
+		}
+		if name == crosshooks.AgentCodex {
+			return printJSON(stdout, hookBlockForAgent(name, codexHookSpecs(invocation)))
+		}
+		if name != crosshooks.AgentClaude {
+			return fmt.Errorf("%s: no hook configuration to print", name)
+		}
 		return printJSON(stdout, hookBlock(claudeHookSpecs(invocation)))
 	}
 
@@ -347,12 +382,12 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 	}
 	for _, detected := range chosen {
 		switch detected.Name {
-		case crosshooks.AgentClaude:
+		case crosshooks.AgentClaude, crosshooks.AgentCodex:
 			if !detected.Found {
-				fmt.Fprintln(stdout, "claude: not found on $PATH, nothing to set up")
+				fmt.Fprintf(stdout, "%s: not found on $PATH, nothing to set up\n", detected.Name)
 				continue
 			}
-			manager, err := claudeConfigManager(*scope, *settings, invocation, executable)
+			manager, err := agentConfigManager(detected.Name, *scope, *settings, invocation, executable)
 			if err != nil {
 				return err
 			}
@@ -363,8 +398,9 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 			if err := applyHookPlan(ctx, manager, plan, stdin, stdout, *yes, *dryRun, *diffOnly, *skipCheck); err != nil {
 				return err
 			}
-		case crosshooks.AgentCodex:
-			fmt.Fprintln(stdout, "codex: no configuration needed")
+			if detected.Name == crosshooks.AgentCodex {
+				fmt.Fprintln(stdout, "codex: metadata hooks require [features].hooks = true in config.toml; this command does not change that setting. Delivery continues through codex queue.")
+			}
 		case crosshooks.AgentPi:
 			fmt.Fprintln(stdout, "pi: use extensions/pi/agentqueue.ts; nothing written")
 		default:
@@ -387,7 +423,7 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]",
-		"Remove only Claude hooks owned by the agentqueue command predicate through crossagent's plan-first configuration manager; other tools' hooks are preserved. Refusals exit non-zero.")
+		"Remove only Claude or Codex hooks owned by the agentqueue command predicate through crossagent's plan-first configuration manager; other tools' hooks are preserved. Refusals exit non-zero.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue uninstall [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]", err)
 	}
@@ -398,7 +434,7 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 	if err != nil {
 		return err
 	}
-	if name != crosshooks.AgentClaude {
+	if name != crosshooks.AgentClaude && name != crosshooks.AgentCodex {
 		fmt.Fprintf(stdout, "%s: nothing managed, nothing to remove\n", name)
 		return nil
 	}
@@ -407,7 +443,7 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 	if value := strings.TrimSpace(*command); value != "" {
 		invocation = shellQuote(value)
 	}
-	manager, err := claudeConfigManager(*scope, *settings, invocation, "")
+	manager, err := agentConfigManager(name, *scope, *settings, invocation, "")
 	if err != nil {
 		return err
 	}
@@ -418,7 +454,7 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 		return err
 	}
 	if !plan.HasChanges {
-		fmt.Fprintf(stdout, "claude: no hooks in %s, nothing to do\n", plan.Path)
+		fmt.Fprintf(stdout, "%s: no hooks in %s, nothing to do\n", name, plan.Path)
 		return nil
 	}
 	return applyHookPlan(ctx, manager, plan, stdin, stdout, *yes, *dryRun, *diffOnly, true)

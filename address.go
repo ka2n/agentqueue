@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ka2n/crossagent/sessioncontext"
 )
 
 // addrFileName holds a session's address inside its target directory.
@@ -35,13 +37,14 @@ const maxCwdSegment = 80
 // token would buy nothing while turning every addr.json into a credential
 // store. Socket is kept for diagnostics only.
 type Address struct {
-	Agent        string    `json:"agent"`
-	Name         string    `json:"name"`
-	Cwd          string    `json:"cwd,omitempty"`
-	PID          int       `json:"pid,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	Socket       string    `json:"socket,omitempty"`
-	AgentVersion string    `json:"agent_version,omitempty"`
+	Context      *sessioncontext.Snapshot `json:"context,omitempty"`
+	Agent        string                   `json:"agent"`
+	Name         string                   `json:"name"`
+	Cwd          string                   `json:"cwd,omitempty"`
+	PID          int                      `json:"pid,omitempty"`
+	UpdatedAt    time.Time                `json:"updated_at"`
+	Socket       string                   `json:"socket,omitempty"`
+	AgentVersion string                   `json:"agent_version,omitempty"`
 }
 
 // Target returns the target this address belongs to.
@@ -104,12 +107,19 @@ func (q *Queue) PutAddress(a Address) error {
 		return fmt.Errorf("encode address: %w", err)
 	}
 	// Write to tmp/ then rename, so a reader never observes a partial file.
-	tmp := filepath.Join(base, tmpDirName, addrFileName+".tmp")
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Join(base, tmpDirName), "addr-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create address: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write address: %w", err)
 	}
-	if err := os.Rename(tmp, filepath.Join(base, addrFileName)); err != nil {
-		_ = os.Remove(tmp)
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close address: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(base, addrFileName)); err != nil {
 		return fmt.Errorf("publish address: %w", err)
 	}
 
@@ -222,7 +232,17 @@ func (q *Queue) TargetsByCwd(agent, cwd string) ([]Target, error) {
 		if e.IsDir() {
 			continue
 		}
-		targets = append(targets, Target{Agent: agent, Name: e.Name()})
+		target := Target{Agent: agent, Name: e.Name()}
+		addr, err := q.Address(target)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if addr.Cwd == cwd {
+			targets = append(targets, target)
+		}
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 	return targets, nil

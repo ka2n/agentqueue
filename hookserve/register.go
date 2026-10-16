@@ -1,12 +1,14 @@
 package hookserve
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
 
 	"github.com/ka2n/agentqueue"
 	"github.com/ka2n/crossagent/agent"
+	"github.com/ka2n/crossagent/sessioncontext"
 )
 
 // errNoRegisterTarget means neither an explicit target, a payload session id,
@@ -27,11 +29,17 @@ func AddressFor(t agentqueue.Target, payload Payload, getenv func(string) string
 			cwd = wd
 		}
 	}
+	name := agent.Name(t.Agent)
+	if !name.Valid() {
+		name = ""
+	}
+	snapshot := sessioncontext.Collect(context.Background(), cwd, sessioncontext.Options{Getenv: getenv, Agent: name, SessionID: t.Name})
 	return agentqueue.Address{
-		Agent: t.Agent,
-		Name:  t.Name,
-		Cwd:   cwd,
-		PID:   pid,
+		Context: &snapshot,
+		Agent:   t.Agent,
+		Name:    t.Name,
+		Cwd:     cwd,
+		PID:     pid,
 		// Recorded for diagnostics only. Writing to this socket from a
 		// process that is not itself a Claude Code session is accepted and
 		// then dropped, so it is not a delivery path. The token that goes

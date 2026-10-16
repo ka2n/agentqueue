@@ -507,3 +507,12 @@ Extracted from [ka2n/jill](https://github.com/ka2n/jill).
 ## License
 
 MIT
+
+Session addresses include optional hook-time `context`: the observed working
+directory, Git worktree root, branch and full HEAD, plus a terminal title when
+Herdr is available and the pane identity matches. `sessions` displays these
+facts from storage; it never refreshes Git or terminal metadata while listing.
+`observed_at` identifies when the snapshot was collected, so it can differ
+from the current checkout. A later registration or supported delivery hook
+refreshes it. Address-only sessions use source `queue-address` and do not
+imply a running process or a new `last_activity` time.
