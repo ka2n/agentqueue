@@ -172,7 +172,7 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 	if plan.Style != crosshooks.MarkerStyleCommandSuffix {
 		t.Fatalf("Claude auto marker style = %q, want command suffix", plan.Style)
 	}
-	if !plan.HasChanges || plan.Summary.Added != 4 || plan.Summary.Removed != 5 || plan.Summary.Modified != 4 {
+	if !plan.HasChanges || plan.Summary.Added != 6 || plan.Summary.Removed != 5 || plan.Summary.Modified != 4 {
 		t.Fatalf("stale command convergence plan = %+v", plan)
 	}
 	var planOutput strings.Builder
@@ -194,6 +194,8 @@ func TestInstallUsesClaudeCommandOwnershipAndPreservesForeignEntries(t *testing.
 			invocation + " hook claude": "session-start-hook",
 		},
 		string(crosshooks.EventUserPromptSubmit): {invocation + " hook claude": "user-prompt-submit-hook"},
+		"PostToolUse":                            {invocation + " hook claude": "post-tool-use-hook"},
+		"PostToolUseFailure":                     {invocation + " hook claude": "post-tool-use-failure-hook"},
 		string(crosshooks.EventStop):             {invocation + " hook claude": "stop-hook"},
 		string(crosshooks.EventSessionEnd):       {invocation + " unregister --agent claude": "session-end-unregister"},
 	}
@@ -262,6 +264,8 @@ func TestInstallWritesClaudeHooksWithSuffixMarkers(t *testing.T) {
 			invocation + " hook claude": "session-start-hook",
 		},
 		string(crosshooks.EventUserPromptSubmit): {invocation + " hook claude": "user-prompt-submit-hook"},
+		"PostToolUse":                            {invocation + " hook claude": "post-tool-use-hook"},
+		"PostToolUseFailure":                     {invocation + " hook claude": "post-tool-use-failure-hook"},
 		string(crosshooks.EventStop):             {invocation + " hook claude": "stop-hook"},
 		string(crosshooks.EventSessionEnd):       {invocation + " unregister --agent claude": "session-end-unregister"},
 	}
@@ -366,7 +370,7 @@ func TestCodexMetadataHooksPreserveOtherToolsAndUninstall(t *testing.T) {
 			command, _ := entry["command"].(string)
 			if strings.HasPrefix(command, "agentqueue ") {
 				found = true
-				if event != "SessionEnd" && !strings.Contains(command, "register --agent codex --quiet") {
+				if (event == "SessionStart" || event == "Stop") && !strings.Contains(command, "register --agent codex --quiet") {
 					t.Fatalf("%s is not a quiet metadata refresh: %q", event, command)
 				}
 			}
@@ -398,10 +402,105 @@ func TestPrintCodexAliasAndRejectUnknownAgent(t *testing.T) {
 	if err := cmdInstall(context.Background(), []string{"--print", "--agent", "codex-cli"}, strings.NewReader(""), &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "register --agent codex --quiet") || strings.Contains(output.String(), "hook claude") || strings.Contains(output.String(), "#crossagent") {
+	if !strings.Contains(output.String(), "register --agent codex --quiet") || strings.Contains(output.String(), "hook claude") || !strings.Contains(output.String(), "#crossagent") {
 		t.Fatalf("incorrect Codex print config: %s", output.String())
 	}
 	if err := cmdInstall(context.Background(), []string{"--print", "--agent", "unknown"}, strings.NewReader(""), &output, &output); err == nil {
 		t.Fatal("unknown agent accepted")
+	}
+}
+
+func TestCodexHooksInstallPreservesForeignAndUninstallsOwned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	foreign := map[string]any{"type": "command", "command": "other-tool inspect", "timeout": float64(12)}
+	writeJSONSettings(t, path, map[string]any{"hooks": map[string]any{"PostToolUse": []any{map[string]any{"matcher": "Bash", "hooks": []any{foreign}}}}})
+	manager, err := agentConfigManager(crosshooks.AgentCodex, "user", path, "/opt/agentqueue", "/opt/agentqueue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := manager.PlanInstall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary.Added != 5 {
+		t.Fatalf("plan = %+v", plan.Summary)
+	}
+	if err := manager.Apply(context.Background(), plan, crosshooks.ApplyOptions{SkipProbe: true}); err != nil {
+		t.Fatal(err)
+	}
+	settings := readJSONSettings(t, path)
+	for _, spec := range codexHookSpecs("/opt/agentqueue") {
+		found := false
+		for _, entry := range commandEntriesForTest(settings, string(spec.Event)) {
+			clean, _, _, _ := crosshooks.ParseCommandSuffixMarker(entry["command"].(string))
+			if clean == spec.Command {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing Codex hook: %+v", spec)
+		}
+	}
+
+	plan, err = manager.PlanInstall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.HasChanges {
+		t.Fatalf("reinstall changes: %+v", plan)
+	}
+	plan, err = manager.PlanUninstall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary.Removed != 5 {
+		t.Fatalf("uninstall = %+v", plan.Summary)
+	}
+	if err := manager.Apply(context.Background(), plan, crosshooks.ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	entries := commandEntriesForTest(readJSONSettings(t, path), "PostToolUse")
+	if len(entries) != 1 || entries[0]["command"] != foreign["command"] || entries[0]["timeout"] != foreign["timeout"] {
+		t.Fatalf("foreign entry changed: %#v", entries)
+	}
+}
+
+func TestCodexHooksRejectLocalScope(t *testing.T) {
+	if _, err := agentConfigManager(crosshooks.AgentCodex, "local", filepath.Join(t.TempDir(), "hooks.json"), "agentqueue", "agentqueue"); err == nil {
+		t.Fatal("local scope unexpectedly supported")
+	}
+}
+
+func TestInstallSettingsRequiresAgentBeforeAnyOutputOrWrite(t *testing.T) {
+	for _, mode := range []string{"--yes", "--print", "--dry-run", "--diff"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "hooks.json")
+			original := []byte(`{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"other-tool stop"}]}]}}`)
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out strings.Builder
+			err := cmdInstall(context.Background(), []string{"--settings", path, mode}, strings.NewReader(""), &out, &out)
+			if err == nil || !strings.Contains(err.Error(), "--settings requires --agent") {
+				t.Fatalf("error = %v", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("unexpected output: %q", out.String())
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(original) {
+				t.Fatalf("settings changed: %s", got)
+			}
+			entries, err := os.ReadDir(filepath.Dir(path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("unexpected created files: %v", entries)
+			}
+		})
 	}
 }

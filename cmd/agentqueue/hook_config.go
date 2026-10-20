@@ -29,6 +29,8 @@ func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 	return []crosshooks.HookSpec{
 		{Event: crosshooks.EventSessionStart, Command: invocation + " hook claude", ID: "session-start-hook"},
 		{Event: crosshooks.EventUserPromptSubmit, Command: invocation + " hook claude", ID: "user-prompt-submit-hook"},
+		{Event: crosshooks.EventPostToolUse, Command: invocation + " hook claude", ID: "post-tool-use-hook"},
+		{Event: crosshooks.EventPostToolUseFailure, Command: invocation + " hook claude", ID: "post-tool-use-failure-hook"},
 		{Event: crosshooks.EventStop, Command: invocation + " hook claude", ID: "stop-hook"},
 		{Event: crosshooks.EventSessionEnd, Command: invocation + " unregister --agent claude", ID: "session-end-unregister"},
 	}
@@ -37,9 +39,10 @@ func claudeHookSpecs(invocation string) []crosshooks.HookSpec {
 func codexHookSpecs(invocation string) []crosshooks.HookSpec {
 	return []crosshooks.HookSpec{
 		{Event: crosshooks.EventSessionStart, Command: invocation + " register --agent codex --quiet", ID: "session-start-register"},
-		{Event: crosshooks.EventUserPromptSubmit, Command: invocation + " register --agent codex --quiet", ID: "user-prompt-submit-register"},
+		{Event: crosshooks.EventUserPromptSubmit, Command: invocation + " hook codex", ID: "user-prompt-submit-hook"},
+		{Event: crosshooks.EventPostToolUse, Command: invocation + " hook codex", ID: "post-tool-use-hook"},
 		{Event: crosshooks.EventStop, Command: invocation + " register --agent codex --quiet", ID: "stop-register"},
-		{Event: crosshooks.EventSessionEnd, Command: invocation + " unregister --agent codex", ID: "session-end-unregister"},
+		{Event: crosshooks.EventSessionEnd, Command: invocation + " unregister --agent codex --quiet", ID: "session-end-unregister"},
 	}
 }
 
@@ -55,9 +58,6 @@ func hookBlockForAgent(agent crossagent.Name, specs []crosshooks.HookSpec) map[s
 		entry := map[string]any{
 			"type":    "command",
 			"command": crosshooks.BuildCommandSuffixMarker(spec.Command, agentqueueToolName, spec.ID),
-		}
-		if agent == crosshooks.AgentCodex {
-			entry["command"] = spec.Command
 		}
 		event := string(spec.Event)
 		byEvent[event] = append(byEvent[event], entry)
@@ -173,7 +173,13 @@ func agentConfigManager(agent crossagent.Name, scope, settings, invocation, exec
 		}
 	}
 	if agent == crosshooks.AgentCodex {
-		manager.Hooks = codexHookSpecs(invocation)
+		if scopeValue == paths.ScopeLocal {
+			return crosshooks.ConfigManager{}, errors.New("codex supports only user or project hook scope")
+		}
+		if strings.TrimSpace(invocation) != "" {
+			manager.Hooks = codexHookSpecs(invocation)
+			manager.Probe = &crosshooks.Probe{Command: []string{executable, "hook", "codex", "--self-check"}, ExpectedToken: hookserve.CodexSelfCheckToken, Timeout: selfCheckTimeout}
+		}
 	}
 	return manager, nil
 }
@@ -336,7 +342,7 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 	var (
 		fs        = newFlagSet("install")
 		agentFlag = fs.String("agent", "", "set up only this agent")
-		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local")
+		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local (Claude only)")
 		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
 		command   = fs.String("command", "", "how to spell the agentqueue binary in a hook command")
 		yes       = fs.Bool("yes", false, "do not ask for confirmation")
@@ -347,12 +353,26 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 	)
 	setFlagUsage(fs, stdout, args,
 		"agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]",
-		"Install Claude delivery hooks or Codex metadata hooks through crossagent's safety-checked, plan-first configuration manager. Claude commands carry a suffix ownership marker in the known command field, and other tools' hooks are preserved without extra JSON ownership fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
+		"Install Claude or Codex delivery and metadata hooks through crossagent's safety-checked, plan-first configuration manager. Claude commands carry a suffix ownership marker in the known command field, and other tools' hooks are preserved without extra JSON ownership fields. The hook command is self-checked before a write unless --skip-self-check is set. Refusals exit non-zero.")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w\nusage: agentqueue install [--agent AGENT] [--scope user|project|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]", err)
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	if strings.TrimSpace(*settings) != "" && strings.TrimSpace(*agentFlag) == "" {
+		return errors.New("--settings requires --agent claude or --agent codex so only one agent's hooks are written to the file")
+	}
+	if strings.TrimSpace(*agentFlag) != "" {
+		name, err := parseAgent(*agentFlag)
+		if err != nil {
+			return err
+		}
+		*agentFlag = string(name)
+		if *printer && name != crosshooks.AgentClaude && name != crosshooks.AgentCodex {
+			return fmt.Errorf("no hook configuration for agent %q; use --agent claude or --agent codex", name)
+		}
 	}
 
 	invocation, executable, err := resolveHookCommand(*command, currentExe(), exec.LookPath)
@@ -399,7 +419,7 @@ func cmdInstall(ctx context.Context, args []string, stdin io.Reader, stdout, _ i
 				return err
 			}
 			if detected.Name == crosshooks.AgentCodex {
-				fmt.Fprintln(stdout, "codex: metadata hooks require [features].hooks = true in config.toml; this command does not change that setting. Delivery continues through codex queue.")
+				fmt.Fprintln(stdout, "codex: hooks require [features].hooks = true in config.toml; review and enable them with /hooks. This command does not change trust settings.")
 			}
 		case crosshooks.AgentPi:
 			fmt.Fprintln(stdout, "pi: use extensions/pi/agentqueue.ts; nothing written")
@@ -414,7 +434,7 @@ func cmdUninstall(ctx context.Context, args []string, stdin io.Reader, stdout io
 	var (
 		fs        = newFlagSet("uninstall")
 		agentFlag = fs.String("agent", string(crosshooks.AgentClaude), "agent whose integration to remove")
-		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local")
+		scope     = fs.String("scope", string(paths.ScopeUser), "which config to write: user, project or local (Claude only)")
 		settings  = fs.String("settings", "", "settings file to write, overriding --scope")
 		command   = fs.String("command", "", "hook command invocation accepted for compatibility")
 		yes       = fs.Bool("yes", false, "do not ask for confirmation")

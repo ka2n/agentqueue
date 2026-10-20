@@ -106,6 +106,38 @@ func TestHookClaudeDeliversPerEvent(t *testing.T) {
 			wantClaimed: 1,
 		},
 		{
+			name:        "PostToolUse delivers without blocking with stop hook active false",
+			payload:     map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "stop_hook_active": false},
+			pending:     1,
+			wantEvent:   "PostToolUse",
+			wantBodies:  []string{"message 1"},
+			wantClaimed: 1,
+		},
+		{
+			name:        "PostToolUse delivers without blocking with stop hook active true",
+			payload:     map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "stop_hook_active": true},
+			pending:     1,
+			wantEvent:   "PostToolUse",
+			wantBodies:  []string{"message 1"},
+			wantClaimed: 1,
+		},
+		{
+			name:        "PostToolUseFailure delivers without blocking with stop hook active false",
+			payload:     map[string]any{"hook_event_name": "PostToolUseFailure", "session_id": "s1", "stop_hook_active": false},
+			pending:     1,
+			wantEvent:   "PostToolUseFailure",
+			wantBodies:  []string{"message 1"},
+			wantClaimed: 1,
+		},
+		{
+			name:        "PostToolUseFailure delivers without blocking with stop hook active true",
+			payload:     map[string]any{"hook_event_name": "PostToolUseFailure", "session_id": "s1", "stop_hook_active": true},
+			pending:     1,
+			wantEvent:   "PostToolUseFailure",
+			wantBodies:  []string{"message 1"},
+			wantClaimed: 1,
+		},
+		{
 			name:         "stop blocks so the turn continues",
 			payload:      map[string]any{"hook_event_name": "Stop", "session_id": "s1", "stop_hook_active": false},
 			pending:      1,
@@ -260,14 +292,14 @@ func TestHookClaudeContextExplainsItself(t *testing.T) {
 	}
 }
 
-// TestHookClaudeDeliversOnceAcrossEvents is the property that lets all three
-// delivery hooks be installed at the same time.
 func TestHookClaudeDeliversOnceAcrossEvents(t *testing.T) {
 	root := t.TempDir()
 	pushOne(t, root, "claude:s1", "only once")
 
 	delivered := 0
 	for _, payload := range []map[string]any{
+		{"hook_event_name": "PostToolUse", "session_id": "s1"},
+		{"hook_event_name": "PostToolUseFailure", "session_id": "s1"},
 		{"hook_event_name": "SessionStart", "session_id": "s1", "source": "startup"},
 		{"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
 		{"hook_event_name": "Stop", "session_id": "s1", "stop_hook_active": false},
@@ -361,7 +393,7 @@ func TestHookClaudeSessionStartRegistersAddress(t *testing.T) {
 
 func TestHookDispatchRejectsUnknownAgent(t *testing.T) {
 	var out, errOut bytes.Buffer
-	code := run(context.Background(), []string{"hook", "codex"}, strings.NewReader(""), &out, &errOut)
+	code := run(context.Background(), []string{"hook", "unknown"}, strings.NewReader(""), &out, &errOut)
 	if code != exitUsage {
 		t.Fatalf("exit = %d, want %d", code, exitUsage)
 	}

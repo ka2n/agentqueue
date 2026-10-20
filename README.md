@@ -22,9 +22,9 @@ running session:
 
 | Agent | Model | How it works |
 | --- | --- | --- |
-| `claude` | push, at the next boundary | Hooks installed by `agentqueue install` claim what is pending and inject it at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
-| `codex` | push | `codex queue --thread <name> --message <notice>` injects an arrival notice into the running thread. No setup needed. |
-| `pi` | push | Supported by the [Pi extension](extensions/pi/README.md), which watches the queue and injects with `pi.sendMessage(..., { triggerTurn: true })`. It claims each item through `agentqueue take`, so delivery stays exactly-once. |
+| `claude` | push, at the next boundary | Hooks installed by `agentqueue install` claim what is pending and inject it after the next tool completes (including failures), at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
+| `codex` | push, at the next tool boundary | Installed hooks claim pending messages after tools finish or on the next prompt. `codex queue` also queues an arrival notice to wake an idle thread. |
+| `pi` | push | Supported by the [Pi extension](extensions/pi/README.md), which watches the queue, steers active turns at the next tool boundary, and starts a turn while idle. It claims each item through `agentqueue take`, so delivery stays exactly-once. |
 | anything else | — | Write a `Transport` (see below). |
 
 ### pi
@@ -59,8 +59,7 @@ agentqueue install
 
 It prints what it found - which agents are on your `$PATH`, how a message
 reaches each one, where each one's config would be written, and what is left to
-configure - and asks which to set up. Claude Code needs hooks; Codex needs
-nothing; Pi uses the extension described in
+configure - and asks which to set up. Claude Code and Codex use hooks; Pi uses the extension described in
 [extensions/pi/README.md](extensions/pi/README.md) and writes no agent config.
 
 ## Claude Code (hook delivery)
@@ -76,7 +75,7 @@ agentqueue install --agent claude --scope user
 Before writing anything it shows the change to your settings file and asks:
 
 - the file, whether it exists, and how big it is;
-- a count of what changes, in hook entries: `+5 hook entries, -0 removed, 0 modified`;
+- a count of what changes, in hook entries: `+6 hook entries, -0 removed, 0 modified`;
 - every hook event already in the file and what happens to it, including the
   events agentqueue never touches - `PreToolUse: 4 existing entries kept, none
   added`, so you can see they are accounted for;
@@ -158,7 +157,7 @@ Then, from anywhere:
 agentqueue push --to claude:<session-id> "PR 42 is green, please review it"
 ```
 
-### The three delivery points
+### Delivery points
 
 Each one fills a hole the others cannot:
 
@@ -166,12 +165,18 @@ Each one fills a hole the others cannot:
 | --- | --- | --- |
 | `SessionStart` | a session starts, resumes, is cleared or forked | Drains everything queued while no session was running. Skipped on `source: "compact"`, where the context is being rebuilt rather than a turn beginning. |
 | `UserPromptSubmit` | the user submits a prompt | Catches what arrived while the session sat idle, delivered alongside the prompt. |
-| `Stop` | the turn is about to end | The only point that can act with no user present: when something was delivered it also returns `decision: "block"` with a reason, so the turn continues and the agent works on the message. |
+| `PostToolUse` / `PostToolUseFailure` | a tool succeeds or fails | Injects queued messages as context for the next model request after tool results. |
+| `Stop` | the turn is about to end | Catches messages when no further tool runs: when something was delivered it also returns `decision: "block"` with a reason, so the turn continues and the agent works on the message. |
+
+Tool completion hooks stay synchronous and return only additional context. They do
+not interrupt running tools; parallel tool calls may finish before the next model
+request. While Claude is idle, messages wait for a prompt or session start.
+Rerun `agentqueue install --agent claude` to add these hooks to an existing install.
 
 `SessionEnd` gets a hook too, but only to drop the address record: `SessionEnd`
 has no decision control, and nothing it prints reaches the model.
 
-**Why all three can be installed at once:** delivery *claims* the item. The
+**Why all delivery hooks can be installed at once:** delivery *claims* the item. The
 hook runs `TakeNext` in a loop, which renames the file out of `pending/`, so
 whichever hook fires first is the only one that sees it. No message is
 delivered twice.
@@ -205,7 +210,7 @@ agentqueue ack --to claude:<session-id> <id>
 ### Addressing a session
 
 A session id is not something a producer knows in advance, so a session records
-itself. The `SessionStart` hook runs `agentqueue register`, which writes
+itself. Claude delivery hooks refresh the session address stored at
 `<root>/claude/<session-id>/addr.json` (mode 0600) with the session's cwd, pid
 and a timestamp, and indexes it under `<root>/claude/_by_cwd/<cwd>/`, so a
 producer can resolve "the session working in this directory". `SessionEnd` runs
@@ -285,9 +290,27 @@ mailbox, or when you want to look before claiming.
 This is the agent-initiated half of the same queue: an item claimed by a hook
 is gone from `pending/`, so a concurrent `wait` will not show it again.
 
-## Codex (push delivery)
+## Codex (tool-boundary delivery)
 
-A Codex thread has an external injection point, so the notice can be pushed:
+Install synchronous Codex hooks, then review and enable them with `/hooks` in
+Codex; builds that gate hooks also require `[features].hooks = true` in
+`config.toml`. Project hooks require Codex's project trust; installation does not
+grant it.
+
+```sh
+agentqueue install --agent codex --scope user
+```
+
+This writes `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`). Use
+`--scope project` for `.codex/hooks.json`; Codex has no local scope. `PostToolUse`
+claims messages after tool completion, including failed shell commands, and
+returns `hookSpecificOutput.additionalContext` for the next model request.
+`UserPromptSubmit` catches messages queued while idle. Running tools finish
+before context is added. Delivery hooks refresh the thread's address and observed
+context; `Stop` refreshes metadata without claiming messages. Session hooks
+register and remove the address.
+
+Push a message to a Codex thread:
 
 ```sh
 agentqueue push --to codex:1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 "the schema migration landed"
@@ -300,7 +323,10 @@ codex queue --thread 1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 \
   --message "[agentqueue] 1 new message for codex:1f0a... (id 1756800000000-0a1b2c3d4e5f, 1 pending). Fetch it with: agentqueue take --to codex:1f0a... --next"
 ```
 
-The agent in that thread sees the notice and fetches the body itself:
+`codex queue` waits for an active turn to finish before the notice is processed.
+The synchronous hooks can deliver the body before that notice is processed.
+If the notice arrives first, the agent can fetch the pending body itself; an
+empty `take` can mean a hook has already delivered it:
 
 ```sh
 agentqueue take --to codex:1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 --next
@@ -344,7 +370,7 @@ syntax and examples without consulting this document.
 | `register [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet] [--json]` | Record a session address from an explicit target or a hook payload/environment. `--quiet` suppresses the success line; `--json` prints the stored address. |
 | `unregister [--agent AGENT] [--to <agent>:<name>] [--root DIR] [--quiet]` | Remove a recorded session address. Removing a missing address succeeds. |
 | `hook claude [--to <agent>:<name>] [--root DIR] [--max N] [--log FILE] [--no-block]` | Serve Claude Code's synchronous hook protocol: read stdin, claim pending messages and print injection JSON. It always exits 0, even on internal failure, so it cannot disrupt a session. |
-| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude writes suffix-marked commands with no extra JSON ownership fields; Codex needs no setup, and Pi uses the extension. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
+| `install [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff] [--print] [--skip-self-check]` | Install the supported integration with a safety-checked settings diff. Claude writes suffix-marked commands with no extra JSON ownership fields; Codex writes `hooks.json` and requires review through `/hooks`; Pi uses the extension. `--settings FILE` requires an explicit `--agent` so each file contains only that agent's hooks. `--diff`, `--dry-run` and `--print` do not write. A refused safety check exits non-zero. |
 | `uninstall [--agent AGENT] [--scope user\|project\|local] [--settings FILE] [--command INVOCATION] [--yes] [--dry-run] [--diff]` | Remove only Claude hooks whose command matches agentqueue's ownership predicate, preserving other settings and hooks. `--diff` and `--dry-run` do not write; a refused safety check exits non-zero. |
 
 Queue commands that expose `--root` resolve it from that flag, then

@@ -71,7 +71,7 @@ func TestHookRefreshAndHistoricalListing(t *testing.T) {
 func TestEmptyMailboxRefreshBoundaries(t *testing.T) {
 	q := openQueue(t)
 	target := agentqueue.Target{Agent: "claude", Name: "root"}
-	for _, event := range []string{eventSessionStart, eventUserPromptSubmit, eventStop} {
+	for _, event := range []string{eventSessionStart, eventUserPromptSubmit, eventPostToolUse, eventPostToolUseFailure, eventStop} {
 		cwd := filepath.Join(t.TempDir(), event)
 		payload := Payload{SessionID: target.Name, Cwd: cwd, HookEventName: event}
 		if _, _, err := HandleClaude(q, payload, Options{Getenv: func(string) string { return "" }}); err != nil {
@@ -89,5 +89,21 @@ func TestEmptyMailboxRefreshBoundaries(t *testing.T) {
 	after, _ := q.Address(target)
 	if after.Cwd != addr.Cwd {
 		t.Fatal("subagent event overwrote parent context")
+	}
+}
+
+func TestCodexEmptyMailboxRefreshesToolAndPromptContext(t *testing.T) {
+	q := openQueue(t)
+	target := agentqueue.Target{Agent: "codex", Name: "thread-context"}
+	for _, event := range []string{eventPostToolUse, eventUserPromptSubmit} {
+		cwd := filepath.Join(t.TempDir(), event)
+		out, delivered, err := HandleCodex(q, Payload{SessionID: target.Name, Cwd: cwd, HookEventName: event}, Options{Getenv: noEnv})
+		if err != nil || delivered || out != nil {
+			t.Fatalf("empty %s hook: %+v %v %v", event, out, delivered, err)
+		}
+		addr, err := q.Address(target)
+		if err != nil || addr.Cwd != cwd || addr.Context == nil || addr.Context.Cwd != cwd || time.Since(addr.Context.ObservedAt) > time.Second {
+			t.Fatalf("%s context: %+v %v", event, addr, err)
+		}
 	}
 }

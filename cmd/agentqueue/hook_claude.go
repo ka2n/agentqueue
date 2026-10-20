@@ -122,19 +122,19 @@ func cmdHookClaude(args []string, stdin io.Reader, stdout, stderr io.Writer) (in
 	return exitOK, nil
 }
 
-// cmdHook dispatches "hook <agent>". Only claude has hooks; every other agent
-// either needs no setup or has no integration yet.
 func cmdHook(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(args) == 0 {
-		return exitUsage, errors.New("usage: agentqueue hook claude [flags]")
+		return exitUsage, errors.New("usage: agentqueue hook <claude|codex> [flags]")
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		return cmdHookClaude([]string{"-h"}, stdin, stdout, stderr)
 	}
 	switch args[0] {
+	case "codex":
+		return cmdHookCodex(args[1:], stdin, stdout, stderr)
 	case agent.Claude.String():
 		return cmdHookClaude(args[1:], stdin, stdout, stderr)
 	default:
-		return exitUsage, fmt.Errorf("no hook integration for agent %q; only %s has one", args[0], agent.Claude)
+		return exitUsage, fmt.Errorf("no hook integration for agent %q; supported agents: claude, codex", args[0])
 	}
 }

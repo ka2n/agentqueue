@@ -125,8 +125,9 @@ Commands:
   register    Record an address for a session.
   unregister  Remove a recorded session address.
   hook claude Serve the synchronous Claude Code hook protocol.
-  install     Install the Claude hook integration, with a safety-checked diff.
-  uninstall   Remove only the Claude hooks installed by agentqueue.
+  hook codex  Serve the synchronous Codex hook protocol.
+  install     Install Claude or Codex hooks, with a safety-checked diff.
+  uninstall   Remove only the Claude or Codex hooks installed by agentqueue.
 
 Common queue flags (where supported; see command help):
   --to <agent>:<name>   target session

@@ -2,7 +2,7 @@
 // agentqueue.Queue.
 //
 // The protocol is: Claude Code runs a hook command at a session boundary
-// (SessionStart, UserPromptSubmit, Stop, SubagentStop), writes a JSON payload to
+// (session, prompt, tool completion or stop), writes a JSON payload to
 // its stdin, and reads a JSON injection back on its stdout. This package turns
 // that payload into a queue read: it claims the pending messages addressed to the
 // session and renders them as the additionalContext Claude Code injects.
@@ -30,10 +30,12 @@ import (
 
 // Hook event names this package acts on. Every other event is ignored.
 const (
-	eventSessionStart     = string(crosshooks.EventSessionStart)
-	eventUserPromptSubmit = string(crosshooks.EventUserPromptSubmit)
-	eventStop             = string(crosshooks.EventStop)
-	eventSubagentStop     = string(crosshooks.EventSubagentStop)
+	eventSessionStart       = string(crosshooks.EventSessionStart)
+	eventUserPromptSubmit   = string(crosshooks.EventUserPromptSubmit)
+	eventPostToolUse        = string(crosshooks.EventPostToolUse)
+	eventPostToolUseFailure = string(crosshooks.EventPostToolUseFailure)
+	eventStop               = string(crosshooks.EventStop)
+	eventSubagentStop       = string(crosshooks.EventSubagentStop)
 )
 
 // SelfCheckToken is the stable string a caller emits for
@@ -143,14 +145,14 @@ func ParsePayload(r io.Reader) (Payload, error) {
 // It claims items (TakeNext), it does not merely read them: claiming is what
 // makes delivery exactly-once when several hooks are installed at the same time.
 //
-// SessionStart, UserPromptSubmit and Stop refresh the address so a producer reacting
-// to the injected context can already address the session. Unless the
+// Delivery events refresh the address before claiming, except SubagentStop whose
+// cwd describes the parent session. Unless the
 // SessionStart source is compaction, delivery follows. Compaction rebuilds a running
 // session, where an injection would land outside any turn and be consumed
 // invisibly, so nothing is delivered there.
 func HandleClaude(q *agentqueue.Queue, payload Payload, opts Options) (*Output, bool, error) {
 	switch payload.HookEventName {
-	case eventSessionStart, eventUserPromptSubmit, eventStop, eventSubagentStop:
+	case eventSessionStart, eventUserPromptSubmit, eventPostToolUse, eventPostToolUseFailure, eventStop, eventSubagentStop:
 	default:
 		// Not an event this package handles.
 		return nil, false, nil
@@ -193,9 +195,8 @@ func HandleClaude(q *agentqueue.Queue, payload Payload, opts Options) (*Output, 
 			AdditionalContext: RenderDelivery(q, target, items),
 		},
 	}
-	// Stop is the only delivery point that can act without the user, but only
-	// if the turn is prevented from ending. stop_hook_active means a Stop hook
-	// already did that for this turn; blocking again is how a hook loops.
+	// stop_hook_active means a Stop hook already continued this turn;
+	// blocking again would create a hook loop.
 	if (payload.HookEventName == eventStop || payload.HookEventName == eventSubagentStop) && !payload.StopHookActive && !opts.NoBlock {
 		out.Decision = "block"
 		out.Reason = fmt.Sprintf("%d queued message(s) arrived for %s; act on them before finishing.", len(items), target)
