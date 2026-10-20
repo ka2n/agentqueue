@@ -2,7 +2,9 @@
 
 This extension delivers filesystem-backed `agentqueue` messages to a Pi session.
 It watches the current session's `pending/` mailbox, claims each item through the
-CLI, and injects the claimed text into the conversation.
+CLI, and injects the claimed text into the conversation. While Pi is running,
+messages use `steer` delivery at the next tool boundary, after current tool work
+finishes. When Pi is idle, a message starts a new turn.
 
 ## Install
 

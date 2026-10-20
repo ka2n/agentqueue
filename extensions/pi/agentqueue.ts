@@ -154,7 +154,7 @@ async function drain(runtime: Runtime, pi: ExtensionAPI): Promise<void> {
 			if (!item || !runtime.active) break;
 			const sendOptions = runtime.ctx.isIdle()
 				? { triggerTurn: true }
-				: { triggerTurn: true, deliverAs: "followUp" as const };
+				: { triggerTurn: true, deliverAs: "steer" as const };
 			pi.sendMessage(
 				{
 					customType: MESSAGE_TYPE,
