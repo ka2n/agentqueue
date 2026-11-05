@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ka2n/agentqueue"
@@ -34,20 +35,26 @@ func AddressFor(t agentqueue.Target, payload Payload, getenv func(string) string
 		name = ""
 	}
 	snapshot := sessioncontext.Collect(context.Background(), cwd, sessioncontext.Options{Getenv: getenv, Agent: name, SessionID: t.Name})
-	return agentqueue.Address{
-		Context: &snapshot,
-		Agent:   t.Agent,
-		Name:    t.Name,
-		Cwd:     cwd,
-		PID:     pid,
-		// Recorded for diagnostics only. Writing to this socket from a
-		// process that is not itself a Claude Code session is accepted and
-		// then dropped, so it is not a delivery path. The token that goes
-		// with it ($CLAUDE_CODE_MESSAGING_TOKEN) is a credential and is
-		// deliberately never stored.
+	address := agentqueue.Address{
+		Context:      &snapshot,
+		Agent:        t.Agent,
+		Name:         t.Name,
+		Cwd:          cwd,
+		PID:          pid,
 		Socket:       strings.TrimSpace(getenv("CLAUDE_CODE_MESSAGING_SOCKET")),
 		AgentVersion: strings.TrimSpace(getenv("CLAUDE_CODE_VERSION")),
 	}
+	if t.Agent == "codex" {
+		address.Socket = ""
+		profile := strings.TrimSpace(getenv("CODEX_HOME"))
+		if profile == "" && getenv("HOME") != "" {
+			profile = filepath.Join(getenv("HOME"), ".codex")
+		}
+		if profile != "" {
+			address.Profile, _ = filepath.Abs(profile)
+		}
+	}
+	return address
 }
 
 // RegisterAddress records the session's address. It is used both by a register
@@ -56,7 +63,16 @@ func RegisterAddress(q *agentqueue.Queue, t agentqueue.Target, payload Payload, 
 	// In a hook the parent is the process that spawned it - the agent or the
 	// shell it ran the hook through - which is the closest thing to the
 	// session's own pid available without probing. It is diagnostic only.
-	return q.PutAddress(AddressFor(t, payload, getenv, os.Getppid()))
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if err := q.PutAddress(AddressFor(t, payload, getenv, os.Getppid())); err != nil {
+		return err
+	}
+	if t.Agent == "claude" && payload.SessionID == t.Name {
+		return q.PutReceiver(t, agentqueue.Receiver{Socket: strings.TrimSpace(getenv("CLAUDE_CODE_MESSAGING_SOCKET")), Token: getenv("CLAUDE_CODE_MESSAGING_TOKEN"), PermissionMode: payload.PermissionMode})
+	}
+	return nil
 }
 
 // RegisterTarget derives the target to register: to wins, then sessionID, then

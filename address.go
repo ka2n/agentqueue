@@ -30,12 +30,8 @@ const maxCwdSegment = 80
 // Address records where a live agent session can be reached, so a producer can
 // address it by session name or by the directory it is working in.
 //
-// It deliberately has no field for the session's messaging token. Claude Code
-// exports CLAUDE_CODE_MESSAGING_TOKEN alongside CLAUDE_CODE_MESSAGING_SOCKET,
-// but that socket is not a usable delivery path for this library (raw writes
-// from a non-session process are accepted and then silently dropped), so the
-// token would buy nothing while turning every addr.json into a credential
-// store. Socket is kept for diagnostics only.
+// Private receiver credentials live in a separate mode-0600 file and are never
+// included in public address/session output.
 type Address struct {
 	Context      *sessioncontext.Snapshot `json:"context,omitempty"`
 	Agent        string                   `json:"agent"`
@@ -44,6 +40,7 @@ type Address struct {
 	PID          int                      `json:"pid,omitempty"`
 	UpdatedAt    time.Time                `json:"updated_at"`
 	Socket       string                   `json:"socket,omitempty"`
+	Profile      string                   `json:"profile,omitempty"`
 	AgentVersion string                   `json:"agent_version,omitempty"`
 }
 
@@ -192,6 +189,9 @@ func (q *Queue) RemoveAddress(t Target) error {
 	}
 	if err := os.Remove(filepath.Join(base, addrFileName)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove address: %w", err)
+	}
+	if err := q.RemoveReceiver(t); err != nil {
+		return err
 	}
 	if addr == nil || addr.Cwd == "" {
 		return nil

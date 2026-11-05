@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -440,33 +440,52 @@ func TestRunTakeArgumentErrors(t *testing.T) {
 	}
 }
 
-func TestCLIHandsCodexTheBodyAndCompletesDelivery(t *testing.T) {
+func TestCLINotificationLeavesBodyForReceiveAndAck(t *testing.T) {
 	root, bin := t.TempDir(), t.TempDir()
 	output := filepath.Join(t.TempDir(), "payload")
 	t.Setenv("DELIVERY_TEST_OUTPUT", output)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nprintf '%s' \"$5\" > \"$DELIVERY_TEST_OUTPUT\"\n"), 0700); err != nil {
+	script := "#!/bin/sh\nprintf '%s' \"$5\" > \"$DELIVERY_TEST_OUTPUT\"\nprintf 'Queued message 738e06d2-1bab-4e10-9ad0-7fe29c5a2c69 for thread 01a1a947-2087-78b3-bafc-0a245b11cd3e.\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
-	}
-	var out, errOut bytes.Buffer
-	body := "first line\nsecond line with $literal and `text`"
-	if code := run(context.Background(), []string{"push", "--root", root, "--to", "codex:session", "-"}, strings.NewReader(body), &out, &errOut); code != exitOK {
-		t.Fatalf("push failed: %s", errOut.String())
-	}
-	payload, err := os.ReadFile(output)
-	if err != nil || !strings.Contains(string(payload), body) {
-		t.Fatalf("body changed: %s, %v", payload, err)
 	}
 	q, err := agentqueue.Open(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := agentqueue.Target{Agent: "codex", Name: "session"}
-	if _, err := q.TakeNext(target); !errors.Is(err, agentqueue.ErrEmpty) {
-		t.Fatalf("accepted item was still pending: %v", err)
+	target := agentqueue.Target{Agent: "codex", Name: "01a1a947-2087-78b3-bafc-0a245b11cd3e"}
+	if err := q.PutAddress(agentqueue.Address{Agent: target.Agent, Name: target.Name, Profile: t.TempDir()}); err != nil {
+		t.Fatal(err)
 	}
-	done, err := q.List(target, agentqueue.StateDone)
-	if err != nil || len(done) != 1 || done[0].ID != strings.TrimSpace(out.String()) {
-		t.Fatalf("handoff not completed: %+v, %v", done, err)
+	var out, errOut bytes.Buffer
+	body := "first line\nsecond line with $literal and `text`"
+	if code := run(context.Background(), []string{"push", "--root", root, "--to", target.String(), "-"}, strings.NewReader(body), &out, &errOut); code != exitOK {
+		t.Fatalf("push: %s", errOut.String())
+	}
+	id := strings.TrimSpace(out.String())
+	payload, err := os.ReadFile(output)
+	if err != nil || strings.Contains(string(payload), body) || !strings.Contains(string(payload), "receive --root") {
+		t.Fatalf("notice = %s, %v", payload, err)
+	}
+	for _, want := range []int{1, 0} {
+		out.Reset()
+		errOut.Reset()
+		if code := run(context.Background(), []string{"receive", "--root", root, "--to", target.String(), "--json"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+			t.Fatalf("receive: %s", errOut.String())
+		}
+		var items []agentqueue.Item
+		if err := json.Unmarshal(out.Bytes(), &items); err != nil || len(items) != want {
+			t.Fatalf("receive = %s, %v", out.String(), err)
+		}
+		if want == 1 && (items[0].ID != id || items[0].Text != body) {
+			t.Fatalf("body = %+v", items)
+		}
+	}
+	claimed, err := q.List(target, agentqueue.StateClaimed)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claimed=%+v, %v", claimed, err)
+	}
+	if err := q.Ack(target, id); err != nil {
+		t.Fatal(err)
 	}
 }
