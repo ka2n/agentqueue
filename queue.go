@@ -208,6 +208,10 @@ func (q *Queue) ensureDirs(t Target) (string, error) {
 // Push persists a new item in the pending state. It sends no notification;
 // use PushAndNotify for that.
 func (q *Queue) Push(t Target, text string, meta map[string]string) (*Item, error) {
+	return q.push(t, text, meta, StatePending)
+}
+
+func (q *Queue) push(t Target, text string, meta map[string]string, state State) (*Item, error) {
 	base, err := q.ensureDirs(t)
 	if err != nil {
 		return nil, err
@@ -236,7 +240,7 @@ func (q *Queue) Push(t Target, text string, meta map[string]string) (*Item, erro
 	if err := os.WriteFile(tmp, body, 0o644); err != nil {
 		return nil, fmt.Errorf("write item: %w", err)
 	}
-	final := filepath.Join(base, StatePending.String(), item.ID+".json")
+	final := filepath.Join(base, state.String(), item.ID+".json")
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("publish item: %w", err)

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -435,5 +437,36 @@ func TestRunTakeArgumentErrors(t *testing.T) {
 		if code := run(context.Background(), args, strings.NewReader(""), &out, &errOut); code != exitError {
 			t.Fatalf("run(%v) exit = %d, want %d", args, code, exitError)
 		}
+	}
+}
+
+func TestCLIHandsCodexTheBodyAndCompletesDelivery(t *testing.T) {
+	root, bin := t.TempDir(), t.TempDir()
+	output := filepath.Join(t.TempDir(), "payload")
+	t.Setenv("DELIVERY_TEST_OUTPUT", output)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\nprintf '%s' \"$5\" > \"$DELIVERY_TEST_OUTPUT\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	body := "first line\nsecond line with $literal and `text`"
+	if code := run(context.Background(), []string{"push", "--root", root, "--to", "codex:session", "-"}, strings.NewReader(body), &out, &errOut); code != exitOK {
+		t.Fatalf("push failed: %s", errOut.String())
+	}
+	payload, err := os.ReadFile(output)
+	if err != nil || !strings.Contains(string(payload), body) {
+		t.Fatalf("body changed: %s, %v", payload, err)
+	}
+	q, err := agentqueue.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := agentqueue.Target{Agent: "codex", Name: "session"}
+	if _, err := q.TakeNext(target); !errors.Is(err, agentqueue.ErrEmpty) {
+		t.Fatalf("accepted item was still pending: %v", err)
+	}
+	done, err := q.List(target, agentqueue.StateDone)
+	if err != nil || len(done) != 1 || done[0].ID != strings.TrimSpace(out.String()) {
+		t.Fatalf("handoff not completed: %+v, %v", done, err)
 	}
 }

@@ -23,7 +23,7 @@ running session:
 | Agent | Model | How it works |
 | --- | --- | --- |
 | `claude` | push, at the next boundary | Hooks installed by `agentqueue install` claim what is pending and inject it after the next tool completes (including failures), at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
-| `codex` | push, at the next tool boundary | Installed hooks claim pending messages after tools finish or on the next prompt. `codex queue` also queues an arrival notice to wake an idle thread. |
+| `codex` | direct body handoff | The adapter claims the item before calling `codex queue` with the body, then archives it on host acceptance. No fetch or transport ACK is required. |
 | `pi` | push | Supported by the [Pi extension](extensions/pi/README.md), which watches the queue, steers active turns at the next tool boundary, and starts a turn while idle. It claims each item through `agentqueue take`, so delivery stays exactly-once. |
 | anything else | — | Write a `Transport` (see below). |
 
@@ -217,23 +217,18 @@ producer can resolve "the session working in this directory". `SessionEnd` runs
 `agentqueue unregister`, which removes both. `agentqueue targets` lists what is
 registered and what each mailbox holds.
 
-### The session inbox socket is not used
+### Claude receive integration
 
-Claude Code exports `CLAUDE_CODE_MESSAGING_SOCKET` and
-`CLAUDE_CODE_MESSAGING_TOKEN` to hooks and Bash commands, for
-[cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging.md).
-This library does **not** deliver over that socket, for one measured reason: a
-raw write from a process that is not itself a Claude Code session is accepted
-and then goes nowhere. There is no response, no early close, and the same
-behavior for valid JSON, unknown record types and non-JSON alike; nothing is
-delivered and nothing is acknowledged. Delivered peer messages carry the
-sender's own socket path as their identity, which a non-session producer cannot
-supply. So the socket path is recorded in `addr.json` for diagnostics only, and
-the token is never stored anywhere - it is a credential, and there is nothing
-this library could do with it.
+The current adapter uses the installed hooks. These inject claimed message
+bodies at supported session boundaries. They cannot on their own promise an
+idle wake, so a background wait remains an optional fallback when no automatic
+receiving integration is active.
 
-Hooks, documented at [code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks),
-are the supported path, which is what `install` configures.
+Current Claude Code also documents a per-session inbox socket and MCP Channels.
+Those are not implemented by this adapter. Their write completion is not a
+receiving acknowledgement, and receiver policy may hold or refuse a message;
+agentqueue does not bypass that policy. The socket token is never persisted.
+See the official [socket contract](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
 ## Session discovery
 
@@ -290,68 +285,34 @@ mailbox, or when you want to look before claiming.
 This is the agent-initiated half of the same queue: an item claimed by a hook
 is gone from `pending/`, so a concurrent `wait` will not show it again.
 
-## Codex (tool-boundary delivery)
+## Codex (direct body delivery)
 
-Install synchronous Codex hooks, then review and enable them with `/hooks` in
-Codex; builds that gate hooks also require `[features].hooks = true` in
-`config.toml`. Project hooks require Codex's project trust; installation does not
-grant it.
+`agentqueue push --to codex:SESSION BODY` passes the complete body, original
+message ID, timestamp and metadata to `codex queue --thread SESSION --message`.
+The item is published as claimed before the command starts, so hooks and pull
+consumers cannot receive it concurrently. Command success archives it to
+`done/`; the receiving model does not fetch or transport-ACK it again.
 
-```sh
-agentqueue install --agent codex --scope user
-```
+A failed command preserves the item in `pending/`. Go callers can retry the same
+ID with `Queue.Notify(ctx, target, id)`; it never resends claimed/done items. An already archived item succeeds, while a
+claimed item returns `ErrDeliveryInProgress` and must not be treated as accepted.
+Archival failure after host success returns `ErrDeliveryAccepted`, leaves the
+item claimed and must not trigger a resend. A crash before the host call or between acceptance and archival leaves an
+uncertain claimed handoff, not an exactly-once guarantee. Inspect/recover that
+claim explicitly; automatic retries never resend it.
 
-This writes `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`). Use
-`--scope project` for `.codex/hooks.json`; Codex has no local scope. `PostToolUse`
-claims messages after tool completion, including failed shell commands, and
-returns `hookSpecificOutput.additionalContext` for the next model request.
-`UserPromptSubmit` catches messages queued while idle. Running tools finish
-before context is added. Delivery hooks refresh the thread's address and observed
-context; `Stop` refreshes metadata without claiming messages. Session hooks
-register and remove the address.
+`done` records transport completion here, not proof the model acted. Application
+receipts, Discussion seen state and Task approval remain separate. Body size is
+not truncated: if the host command rejects it, delivery fails and retains it.
 
-Push a message to a Codex thread:
+## Common receive contract
 
-```sh
-agentqueue push --to codex:1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 "the schema migration landed"
-```
-
-That stores the message, then shells out to:
-
-```sh
-codex queue --thread 1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 \
-  --message "[agentqueue] 1 new message for codex:1f0a... (id 1756800000000-0a1b2c3d4e5f, 1 pending). Fetch it with: agentqueue take --to codex:1f0a... --next"
-```
-
-`codex queue` waits for an active turn to finish before the notice is processed.
-The synchronous hooks can deliver the body before that notice is processed.
-If the notice arrives first, the agent can fetch the pending body itself; an
-empty `take` can mean a hook has already delivered it:
-
-```sh
-agentqueue take --to codex:1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 --next
-agentqueue ack  --to codex:1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8 <id>
-```
-
-## The notice carries no payload
-
-This is deliberate. The notification path — a `codex queue` argv, and whatever
-other transports get added — only says *that* something arrived and *how to
-fetch it*: the target, the item id, the pending count, and the fetch command.
-The body never travels on it.
-
-Three reasons. A message can be large, and an injected prompt is a bad place for
-a wall of text. A message can be sensitive, and the notification path is the
-part most likely to be logged, echoed into a transcript, or visible in a process
-list. And the fetch is the claim: pulling the body through `take` moves the item
-out of `pending`, so exactly one consumer gets it even when several are racing —
-whereas a notice containing the body would deliver it before anybody claimed
-anything.
-
-Hook delivery is the one place a body does travel, and the same reasoning is
-why that is sound rather than an exception: the hook claims the item first and
-then renders it, so the injection *is* the claim. There is no window in which
-the body has been shown to a session that does not own it.
+Act on the body delivered by the established agent integration. Follow receipt
+instructions in that envelope; do not fetch a body already present. A claimed
+hook/extension delivery can still request ACK, while an automatically archived
+handoff does not. Use wait/take only for fallback or recovery, never as a second
+consumer alongside automatic delivery. Host setup and wake support belong in
+the adapter/integration; workflows do not choose a receiver based on agent name.
 
 ## Commands
 
@@ -507,18 +468,20 @@ A transport is two methods:
 ```go
 type Transport interface {
 	Name() string                              // the agent name used in a Target
-	Notify(ctx context.Context, n Notice) error // deliver the arrival notice
+	Notify(ctx context.Context, n Notice) error // hand off through the receiver integration
 }
 ```
 
 Implement it, then `agentqueue.Register(&myTransport{})` — after which
 `<myagent>:<name>` targets work everywhere, CLI included. The `Notice` you get
-carries `Target`, `ItemID`, `Pending` and `FetchCmd`; keep the body out of it.
+carries `Target`, `ItemID`, `Pending`, `FetchCmd` and the full `Item`.
 
 If your agent is pull-based, like Claude Code, `Notify` should be a no-op:
 enqueuing is complete once the item is stored, and delivery happens when the
-session's own `wait` returns. If it is push-based, deliver a single line naming
-the item and the fetch command — see `transport_codex.go` for the shape.
+session's integration receives the item. For direct body handoff, also implement
+`DirectDelivery() bool` returning true. Queue operations then claim before
+handoff and archive after `Notify` succeeds. Use `Queue.Notify` to retry persisted
+items so claim/receipt behavior remains centralized.
 
 ## Credits / prior art
 

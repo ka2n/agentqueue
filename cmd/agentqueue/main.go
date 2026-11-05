@@ -99,8 +99,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	return code
 }
 
-// usage lists every subcommand. It is written for an agent reader, because the
-// arrival notice pushed into a codex thread points the agent at these commands.
+// usage lists the common sender and fallback receiver commands.
 func usage(w io.Writer) {
 	fmt.Fprint(w, `agentqueue - a message queue for AI coding-agent sessions.
 
@@ -143,16 +142,12 @@ Exit codes:
   2  a usage problem or command help
   3  wait timed out with no message (not an error)
 
-Delivery depends on the agent. A claude session is delivered to by hooks: with
-"agentqueue install", a queued message is injected at the next session
-boundary - session start, the next prompt, or the end of a turn - and the item
-is claimed as it is delivered, so no message arrives twice. A claude session
-can also pull, by running "agentqueue wait" as a background command and
-resuming when it exits; that needs no hooks. A codex session is pushed an
-arrival notice on enqueue; the notice carries no message body, only the id and
-the command that fetches it. A pi session uses the in-process extension in
-extensions/pi/agentqueue.ts, which watches its pending directory and claims
-messages through this CLI before injecting them.
+The configured agent integration receives complete message bodies. A direct
+transport archives an item after host acceptance; other integrations claim the
+body before injecting it and include any remaining receipt instructions.
+Do not fetch an already delivered body or run a competing wait consumer.
+wait/take/ack remain available for fallback and recovery. Host acceptance does
+not prove that the model has read or acted on a message.
 `)
 }
 
