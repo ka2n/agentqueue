@@ -2,19 +2,18 @@ package agentqueue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // maxNoticeOutput caps how much command output is quoted back in an error.
 const maxNoticeOutput = 500
 
-// codexTransport serves "codex" targets by shelling out to the codex CLI.
-//
-// Codex sessions are push-based: `codex queue --thread <name> --message <text>`
-// injects a message into a running thread. Only the arrival notice is pushed,
-// never the item body, so the agent fetches the payload itself.
+// codexTransport hands the complete message to Codex's own queue. Command
+// success is host acceptance, not proof that the model has processed the body.
 type codexTransport struct {
 	// run executes the notify command. It is injectable so tests can assert the
 	// argv without spawning codex.
@@ -24,13 +23,18 @@ type codexTransport struct {
 // Name returns the agent name this transport serves.
 func (c *codexTransport) Name() string { return "codex" }
 
-// Notify pushes a one-line arrival notice into the codex thread.
+func (c *codexTransport) DirectDelivery() bool { return true }
+
+// Notify hands the complete body to the named Codex thread.
 func (c *codexTransport) Notify(ctx context.Context, n Notice) error {
 	run := c.run
 	if run == nil {
 		run = execRun
 	}
-	msg := noticeMessage(n)
+	if n.Item == nil || strings.TrimSpace(n.Item.Text) == "" {
+		return fmt.Errorf("Codex delivery requires a message body")
+	}
+	msg := deliveryMessage(n)
 	out, err := run(ctx, "codex", "queue", "--thread", n.Target.Name, "--message", msg)
 	if err != nil {
 		return fmt.Errorf("codex queue: %w: %s", err, truncate(strings.TrimSpace(string(out)), maxNoticeOutput))
@@ -38,15 +42,17 @@ func (c *codexTransport) Notify(ctx context.Context, n Notice) error {
 	return nil
 }
 
-// noticeMessage renders the single-line notice. It names the item and how to
-// fetch it, and never includes the item text.
-func noticeMessage(n Notice) string {
-	pending := n.Pending
-	if pending < 1 {
-		pending = 1
+func deliveryMessage(n Notice) string {
+	var message strings.Builder
+	fmt.Fprintf(&message, "[agentqueue message id=%s target=%s created_at=%s]\n", n.ItemID, n.Target, n.Item.CreatedAt.UTC().Format(time.RFC3339Nano))
+	if len(n.Item.Meta) > 0 {
+		metadata, _ := json.Marshal(n.Item.Meta)
+		fmt.Fprintf(&message, "metadata: %s\n", metadata)
 	}
-	return fmt.Sprintf("[agentqueue] 1 new message for %s (id %s, %d pending). Fetch it with: %s",
-		n.Target, n.ItemID, pending, n.FetchCmd)
+	message.WriteString("\n")
+	message.WriteString(n.Item.Text)
+	message.WriteString("\n\n[agentqueue: body delivered directly; no queue fetch or transport ACK is required.]")
+	return message.String()
 }
 
 // execRun is the default runner: run the command and capture both streams.
