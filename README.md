@@ -542,3 +542,23 @@ facts from storage; it never refreshes Git or terminal metadata while listing.
 from the current checkout. A later registration or supported delivery hook
 refreshes it. Address-only sessions use source `queue-address` and do not
 imply a running process or a new `last_activity` time.
+
+### Calling session reply endpoint
+
+Go applications can use `ResolveCaller(CallerOptions{})` to resolve a reply
+endpoint without guessing from a working directory or listing sessions.
+Explicit `Target`/`Root` options override environment defaults independently.
+Target resolution delegates to crossagent's `processcontext.Resolve`: native
+`CODEX_THREAD_ID`/`CLAUDE_CODE_SESSION_ID` or integration-provided
+`CROSSAGENT_AGENT`/`CROSSAGENT_SESSION_ID`.
+Missing or ambiguous identity returns an error. Root resolution uses
+`AGENTQUEUE_ROOT`, then `XDG_STATE_HOME/agentqueue`, then
+`HOME/.local/state/agentqueue`; applications may pass their own root override.
+
+The Claude SessionStart hook writes the current target and queue root to
+`CLAUDE_ENV_FILE` when supplied. The Pi extension exports the active target
+and root before commands run, and updates them when a new session starts.
+Custom host launchers should export `CROSSAGENT_AGENT`, `CROSSAGENT_SESSION_ID`
+and `AGENTQUEUE_ROOT` for their own session. Conflicting inherited native identity
+must be removed by the launcher or callers must supply an explicit target.
+A resolved endpoint does not guarantee an active consumer or host wake-up.

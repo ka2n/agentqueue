@@ -168,6 +168,11 @@ func HandleClaude(q *agentqueue.Queue, payload Payload, opts Options) (*Output, 
 		return nil, false, nil
 	}
 
+	if payload.HookEventName == eventSessionStart {
+		if err := exportCaller(q, target, getenv); err != nil {
+			opts.logf("export caller: %v", err)
+		}
+	}
 	if payload.HookEventName != eventSubagentStop {
 		// SubagentStop carries the parent cwd, which cannot describe a child checkout.
 		if err := RegisterAddress(q, target, payload, getenv); err != nil {

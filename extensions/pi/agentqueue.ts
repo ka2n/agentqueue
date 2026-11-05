@@ -236,7 +236,10 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		await stopRuntime(runtime);
+		if (process.env.CROSSAGENT_AGENT === "pi" && `pi:${process.env.CROSSAGENT_SESSION_ID}` === runtime?.target) {
+            delete process.env.CROSSAGENT_AGENT; delete process.env.CROSSAGENT_SESSION_ID;
+        }
+        await stopRuntime(runtime);
 		const sessionID = ctx.sessionManager.getSessionId();
 		if (!sessionID) {
 			runtime = undefined;
@@ -245,6 +248,9 @@ export default function (pi: ExtensionAPI): void {
 		}
 
 		const root = queueRoot();
+        process.env.CROSSAGENT_AGENT = "pi";
+        process.env.CROSSAGENT_SESSION_ID = sessionID;
+        process.env.AGENTQUEUE_ROOT = root;
 		runtime = {
 			active: true,
 			pi,
@@ -276,6 +282,9 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
+        if (process.env.CROSSAGENT_AGENT === "pi" && `pi:${process.env.CROSSAGENT_SESSION_ID}` === runtime?.target) {
+            delete process.env.CROSSAGENT_AGENT; delete process.env.CROSSAGENT_SESSION_ID;
+        }
 		await stopRuntime(runtime);
 		runtime = undefined;
 	});
