@@ -22,9 +22,9 @@ running session:
 
 | Agent | Model | How it works |
 | --- | --- | --- |
-| `claude` | push, at the next boundary | Hooks installed by `agentqueue install` claim what is pending and inject it after the next tool completes (including failures), at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
-| `codex` | direct body handoff | The adapter claims the item before calling `codex queue` with the body, then archives it on host acceptance. No fetch or transport ACK is required. |
-| `pi` | push | Supported by the [Pi extension](extensions/pi/README.md), which watches the queue, steers active turns at the next tool boundary, and starts a turn while idle. It claims each item through `agentqueue take`, so delivery stays exactly-once. |
+| `claude` | native inbox signal or hook delivery | A privately registered native messaging socket receives a hint when available. Otherwise hooks installed by `agentqueue install` claim what is pending and inject it after the next tool completes (including failures), at session start, at the next prompt, or at the end of a turn. Optionally the session can also pull, by blocking on `agentqueue wait` as a background command. |
+| `codex` | inbox signal | Calls `codex queue` with a hint, verifies the thread/queue receipt and retains the pending body. |
+| `pi` | push | Supported by the [Pi extension](extensions/pi/README.md), which watches the queue, steers active turns at the next tool boundary, and starts a turn while idle. It claims each item through `agentqueue take`, so competing consumers cannot acquire the same body. |
 | anything else | — | Write a `Transport` (see below). |
 
 ### pi
@@ -285,34 +285,32 @@ mailbox, or when you want to look before claiming.
 This is the agent-initiated half of the same queue: an item claimed by a hook
 is gone from `pending/`, so a concurrent `wait` will not show it again.
 
-## Codex (direct body delivery)
+## Notification and receive contract
 
-`agentqueue push --to codex:SESSION BODY` passes the complete body, original
-message ID, timestamp and metadata to `codex queue --thread SESSION --message`.
-The item is published as claimed before the command starts, so hooks and pull
-consumers cannot receive it concurrently. Command success archives it to
-`done/`; the receiving model does not fetch or transport-ACK it again.
+`push` persists the body before signalling the receiver. Notifications contain
+an inbox hint, notice ID and timestamp, never the body. Codex submissions use the
+registered receiving profile (`CODEX_HOME`) and require a matching thread UUID
+and queue ID receipt. Claude can receive the same hint through its registered
+native messaging socket; the token lives only in a private mode-600 file.
+A successful socket write is recorded as `written`, not receiver acceptance.
+Without native routing, existing hooks/extensions deliver pending bodies.
 
-A failed command preserves the item in `pending/`. Go callers can retry the same
-ID with `Queue.Notify(ctx, target, id)`; it never resends claimed/done items. An already archived item succeeds, while a
-claimed item returns `ErrDeliveryInProgress` and must not be treated as accepted.
-Archival failure after host success returns `ErrDeliveryAccepted`, leaves the
-item claimed and must not trigger a resend. A crash before the host call or between acceptance and archival leaves an
-uncertain claimed handoff, not an exactly-once guarantee. Inspect/recover that
-claim explicitly; automatic retries never resend it.
+On a hint, use `agentqueue receive --to TARGET --json`. It atomically claims up
+to 20 pending items (configurable through `--limit`, at most 100). Handle each
+body and `ack` its ID, then receive again until `[]`. Empty is successful: a
+hook or another receiver may already have consumed the hinted items. If an
+integration already supplied the body, act on that body and its receipt
+instructions without fetching it again. Blocking wait remains an explicit
+fallback when automatic receiving is unavailable.
 
-`done` records transport completion here, not proof the model acted. Application
-receipts, Discussion seen state and Task approval remain separate. Body size is
-not truncated: if the host command rejects it, delivery fails and retains it.
-
-## Common receive contract
-
-Act on the body delivered by the established agent integration. Follow receipt
-instructions in that envelope; do not fetch a body already present. A claimed
-hook/extension delivery can still request ACK, while an automatically archived
-handoff does not. Use wait/take only for fallback or recovery, never as a second
-consumer alongside automatic delivery. Host setup and wake support belong in
-the adapter/integration; workflows do not choose a receiver based on agent name.
+Notification receipts are stored independently of body pending/claimed/done
+state. Repeating `Queue.Notify` for an already notified ID does not send another
+hint merely because the body is unread. New IDs trigger a new inbox snapshot.
+An OS lock serializes native submissions; a persisted reservation bounds crash
+or ambiguous acceptance retries to a 30-second uncertainty interval. Retried
+signals can duplicate, but atomic claims prevent duplicate body acquisition.
+Notification acceptance, body ACK, application read state and Task approval
+are distinct. `DirectDelivery` remains source-compatible but is no longer used.
 
 ## Commands
 
@@ -324,6 +322,7 @@ syntax and examples without consulting this document.
 | `push --to <agent>:<name> [--root DIR] [--meta KEY=VALUE]... [TEXT\|-]` | Enqueue a message and notify the target when supported. `-` or no text reads the body from stdin; repeated `--meta` flags attach metadata. Exit 0 when queued, 1 on an error (including notification failure; the item remains queued), 2 for invalid usage. |
 | `wait --to <agent>:<name> [--root DIR] [--timeout SECONDS] [--take] [--json]` | Wait for a pending message. `--take` claims and prints the oldest one; without it, all pending bodies are reported without claiming. `--timeout` defaults to 3600 seconds and `0` waits forever. Exit 3 when the timeout expires. |
 | `list --to <agent>:<name> [--root DIR] [--state pending\|claimed\|done] [--json]` | List one mailbox state, defaulting to `pending`, without changing messages. |
+| `receive --to <agent>:<name> [--limit N] [--json]` | Claim a batch of unread bodies. Empty is a successful `[]`; handle and ACK each ID, then drain until empty. |
 | `take --to <agent>:<name> [--root DIR] [--json] (--next \| ID)` | Claim exactly one pending message, either the oldest with `--next` or the given ID, and print it. |
 | `ack --to <agent>:<name> [--root DIR] ID` | Mark one pending or claimed message done after acting on it. |
 | `targets [--agent AGENT] [--root DIR] [--json]` | List mailboxes and their pending, claimed and done counts, recorded cwd and address status. A mailbox is storage metadata, not proof of a running session. |
@@ -476,12 +475,11 @@ Implement it, then `agentqueue.Register(&myTransport{})` — after which
 `<myagent>:<name>` targets work everywhere, CLI included. The `Notice` you get
 carries `Target`, `ItemID`, `Pending`, `FetchCmd` and the full `Item`.
 
-If your agent is pull-based, like Claude Code, `Notify` should be a no-op:
-enqueuing is complete once the item is stored, and delivery happens when the
-session's integration receives the item. For direct body handoff, also implement
-`DirectDelivery() bool` returning true. Queue operations then claim before
-handoff and archive after `Notify` succeeds. Use `Queue.Notify` to retry persisted
-items so claim/receipt behavior remains centralized.
+Pull-only integrations can keep `Notify` as a no-op. Native hint adapters can
+implement `ReceiptTransport.NotifyWithReceipt`, returning queued (verifiable
+host queue receipt), written (socket write only), or deferred (existing receiver
+must deliver). Use `Queue.Notify` for persisted items so reservations and
+notification deduplication remain centralized; it never claims or ACKs bodies.
 
 ## Credits / prior art
 

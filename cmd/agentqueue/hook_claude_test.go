@@ -284,7 +284,7 @@ func TestHookClaudeContextExplainsItself(t *testing.T) {
 		"external producer",
 		"not written by the user",
 		"already claimed",
-		"agentqueue ack --to claude:s1",
+		"ack --root ", "--to claude:s1",
 	} {
 		if !strings.Contains(ctx, want) {
 			t.Fatalf("additionalContext is missing %q:\n%s", want, ctx)

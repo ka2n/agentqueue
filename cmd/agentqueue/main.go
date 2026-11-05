@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"al.essio.dev/pkg/shellescape"
 	"github.com/ka2n/agentqueue"
 	"github.com/ka2n/crossagent/agent"
 )
@@ -62,6 +63,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		code, err = cmdWait(ctx, args[1:], stdout, stderr)
 	case "list":
 		err = cmdList(args[1:], stdout)
+	case "receive":
+		err = cmdReceive(args[1:], stdout)
 	case "take":
 		err = cmdTake(args[1:], stdout)
 	case "ack":
@@ -117,6 +120,7 @@ Commands:
   push        Enqueue a message and notify the target when supported.
   wait        Wait for a message; optionally claim it for a background agent.
   list        List one target's messages in pending, claimed or done state.
+  receive     Claim an inbox batch; empty is a successful stale notification.
   take        Claim one pending message by ID or with --next.
   ack         Mark one pending or claimed message done.
   targets     List queue mailboxes, counts and recorded addresses.
@@ -142,12 +146,11 @@ Exit codes:
   2  a usage problem or command help
   3  wait timed out with no message (not an error)
 
-The configured agent integration receives complete message bodies. A direct
-transport archives an item after host acceptance; other integrations claim the
-body before injecting it and include any remaining receipt instructions.
-Do not fetch an already delivered body or run a competing wait consumer.
-wait/take/ack remain available for fallback and recovery. Host acceptance does
-not prove that the model has read or acted on a message.
+Notifications signal that the inbox changed; they do not consume message bodies.
+Use receive --json to claim unread bodies, then ack each successfully handled ID.
+An empty receive is successful: another receiver may already have consumed it.
+Existing integrations can also deliver bodies directly; do not fetch those again.
+Host notification acceptance does not prove a body was read or processed.
 `)
 }
 
@@ -239,9 +242,16 @@ func openQueue(override string) (*agentqueue.Queue, error) {
 	if err != nil {
 		return nil, err
 	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+
 	prog := progName(os.Args[0])
 	return agentqueue.Open(root, agentqueue.WithFetchCmd(func(t agentqueue.Target) string {
-		return fmt.Sprintf("%s take --to %s --next", prog, t)
+		return fmt.Sprintf("%s receive --root %s --to %s --json", shellescape.Quote(prog), shellescape.Quote(root), shellescape.Quote(t.String()))
+	}), agentqueue.WithAckCmd(func(t agentqueue.Target, id string) string {
+		return fmt.Sprintf("%s ack --root %s --to %s %s", shellescape.Quote(prog), shellescape.Quote(root), shellescape.Quote(t.String()), shellescape.Quote(id))
 	}))
 }
 
@@ -466,7 +476,7 @@ func cmdWait(ctx context.Context, args []string, stdout, stderr io.Writer) (int,
 		}
 		fmt.Fprintf(stdout, "%s\n", item.Text)
 	}
-	fmt.Fprintf(stdout, "\nClaim one with: %s\n", q.FetchCmd(target))
+	fmt.Fprintf(stdout, "\nReceive with: %s\n", q.FetchCmd(target))
 	return exitOK, nil
 }
 
@@ -605,4 +615,39 @@ func cmdAck(args []string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "acked %s\n", rest[0])
 	return nil
+}
+
+func cmdReceive(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("receive", flag.ContinueOnError)
+	to := fs.String("to", "", "target session")
+	root := fs.String("root", "", "queue root")
+	limit := fs.Int("limit", 20, "maximum messages (1..100)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *limit < 1 || *limit > 100 {
+		return fmt.Errorf("limit must be between 1 and 100")
+	}
+	target, err := resolveTarget(*to)
+	if err != nil {
+		return err
+	}
+	q, err := openQueue(*root)
+	if err != nil {
+		return err
+	}
+	items, receiveErr := q.Receive(target, *limit)
+	if *asJSON {
+		if err := printJSON(stdout, items); err != nil {
+			return err
+		}
+	} else {
+		for i := range items {
+			if err := printItem(stdout, &items[i], false); err != nil {
+				return err
+			}
+		}
+	}
+	return receiveErr
 }

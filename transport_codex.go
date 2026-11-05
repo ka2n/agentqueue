@@ -2,70 +2,85 @@ package agentqueue
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
-// maxNoticeOutput caps how much command output is quoted back in an error.
 const maxNoticeOutput = 500
 
-// codexTransport hands the complete message to Codex's own queue. Command
-// success is host acceptance, not proof that the model has processed the body.
+var queuedReceipt = regexp.MustCompile(`(?m)^Queued message ([0-9a-fA-F-]{36}) for thread ([0-9a-fA-F-]{36})\.?\s*$`)
+
 type codexTransport struct {
-	// run executes the notify command. It is injectable so tests can assert the
-	// argv without spawning codex.
-	run func(ctx context.Context, name string, args ...string) ([]byte, error)
+	run        func(context.Context, string, ...string) ([]byte, error)
+	runProfile func(context.Context, string, string, ...string) ([]byte, error)
 }
 
-// Name returns the agent name this transport serves.
-func (c *codexTransport) Name() string { return "codex" }
-
-func (c *codexTransport) DirectDelivery() bool { return true }
-
-// Notify hands the complete body to the named Codex thread.
+func (*codexTransport) Name() string { return "codex" }
 func (c *codexTransport) Notify(ctx context.Context, n Notice) error {
-	run := c.run
-	if run == nil {
-		run = execRun
+	_, err := c.NotifyWithReceipt(ctx, n)
+	return err
+}
+func (c *codexTransport) NotifyWithReceipt(ctx context.Context, n Notice) (HostReceipt, error) {
+	if n.Address == nil || !filepath.IsAbs(n.Address.Profile) {
+		return HostReceipt{State: "deferred"}, nil
 	}
-	if n.Item == nil || strings.TrimSpace(n.Item.Text) == "" {
-		return fmt.Errorf("Codex delivery requires a message body")
-	}
-	msg := deliveryMessage(n)
-	out, err := run(ctx, "codex", "queue", "--thread", n.Target.Name, "--message", msg)
+	target, err := uuid.Parse(n.Target.Name)
 	if err != nil {
-		return fmt.Errorf("codex queue: %w: %s", err, truncate(strings.TrimSpace(string(out)), maxNoticeOutput))
+		return HostReceipt{}, fmt.Errorf("Codex notification requires a thread UUID")
 	}
-	return nil
-}
-
-func deliveryMessage(n Notice) string {
-	var message strings.Builder
-	fmt.Fprintf(&message, "[agentqueue message id=%s target=%s created_at=%s]\n", n.ItemID, n.Target, n.Item.CreatedAt.UTC().Format(time.RFC3339Nano))
-	if len(n.Item.Meta) > 0 {
-		metadata, _ := json.Marshal(n.Item.Meta)
-		fmt.Fprintf(&message, "metadata: %s\n", metadata)
+	args := []string{"queue", "--thread", n.Target.Name, "--message", noticeMessage(n)}
+	var out []byte
+	if c.runProfile != nil {
+		out, err = c.runProfile(ctx, n.Address.Profile, "codex", args...)
+	} else if c.run != nil {
+		out, err = c.run(ctx, "codex", args...)
+	} else {
+		command := exec.CommandContext(ctx, "codex", args...)
+		env := make([]string, 0, len(os.Environ())+1)
+		for _, value := range os.Environ() {
+			if !strings.HasPrefix(value, "CODEX_HOME=") {
+				env = append(env, value)
+			}
+		}
+		command.Env = append(env, "CODEX_HOME="+n.Address.Profile)
+		out, err = command.CombinedOutput()
 	}
-	message.WriteString("\n")
-	message.WriteString(n.Item.Text)
-	message.WriteString("\n\n[agentqueue: body delivered directly; no queue fetch or transport ACK is required.]")
-	return message.String()
+	if err != nil {
+		if ctx.Err() != nil {
+			return HostReceipt{}, fmt.Errorf("%w: Codex queue timed out or was cancelled", ErrNotificationUncertain)
+		}
+		return HostReceipt{}, fmt.Errorf("codex queue: %w: %s", err, truncate(strings.TrimSpace(string(out)), maxNoticeOutput))
+	}
+	matches := queuedReceipt.FindStringSubmatch(string(out))
+	if len(matches) != 3 {
+		return HostReceipt{}, fmt.Errorf("%w: unrecognized Codex queue receipt", ErrNotificationUncertain)
+	}
+	if _, err := uuid.Parse(matches[1]); err != nil {
+		return HostReceipt{}, fmt.Errorf("%w: invalid queue ID", ErrNotificationUncertain)
+	}
+	received, err := uuid.Parse(matches[2])
+	if err != nil || target != received {
+		return HostReceipt{}, fmt.Errorf("%w: queue receipt names another thread", ErrNotificationUncertain)
+	}
+	return HostReceipt{State: "queued", QueueID: matches[1], ThreadID: matches[2]}, nil
 }
-
-// execRun is the default runner: run the command and capture both streams.
+func noticeMessage(n Notice) string {
+	return fmt.Sprintf("[agentqueue notice %s; generated %s] Your inbox changed. Receive unread messages with: %s. Receive batches until empty, handling and ACKing each item before continuing. This is a signal, not a new request; an empty inbox means it was already consumed. Do not retry an empty receive.", n.ID, n.GeneratedAt.UTC().Format(time.RFC3339Nano), n.FetchCmd)
+}
 func execRun(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
-
-// truncate shortens s to at most max bytes, marking that it was cut.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
 	return s[:max] + "... (truncated)"
 }
-
 func init() { Register(&codexTransport{}) }

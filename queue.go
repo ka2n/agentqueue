@@ -21,8 +21,8 @@ const tmpDirName = "tmp"
 
 // Queue is a filesystem-backed queue rooted at a directory.
 //
-// A Queue holds no open handles and takes no locks: every state change is an
-// atomic rename, so any number of processes may share the same root.
+// Payload ownership uses atomic renames. Notification submission additionally
+// takes a short target-scoped file lock to serialize notification snapshots.
 type Queue struct {
 	root     string
 	now      func() time.Time
@@ -80,9 +80,9 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
-// defaultFetchCmd renders the standalone CLI's take command.
+// defaultFetchCmd renders the standalone CLI's receive command.
 func defaultFetchCmd(t Target) string {
-	return fmt.Sprintf("agentqueue take --to %s --next", t)
+	return fmt.Sprintf("agentqueue receive --to %s --json", t)
 }
 
 // defaultAckCmd renders the standalone CLI's ack command.
@@ -208,10 +208,6 @@ func (q *Queue) ensureDirs(t Target) (string, error) {
 // Push persists a new item in the pending state. It sends no notification;
 // use PushAndNotify for that.
 func (q *Queue) Push(t Target, text string, meta map[string]string) (*Item, error) {
-	return q.push(t, text, meta, StatePending)
-}
-
-func (q *Queue) push(t Target, text string, meta map[string]string, state State) (*Item, error) {
 	base, err := q.ensureDirs(t)
 	if err != nil {
 		return nil, err
@@ -240,7 +236,7 @@ func (q *Queue) push(t Target, text string, meta map[string]string, state State)
 	if err := os.WriteFile(tmp, body, 0o644); err != nil {
 		return nil, fmt.Errorf("write item: %w", err)
 	}
-	final := filepath.Join(base, state.String(), item.ID+".json")
+	final := filepath.Join(base, StatePending.String(), item.ID+".json")
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("publish item: %w", err)

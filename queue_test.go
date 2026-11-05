@@ -393,7 +393,7 @@ func TestWaitContextCancel(t *testing.T) {
 func TestFetchCmdDefault(t *testing.T) {
 	q, _ := mustOpen(t)
 	got := q.FetchCmd(Target{Agent: "codex", Name: "thread-1"})
-	want := "agentqueue take --to codex:thread-1 --next"
+	want := "agentqueue receive --to codex:thread-1 --json"
 	if got != want {
 		t.Fatalf("FetchCmd() = %q, want %q", got, want)
 	}
@@ -412,7 +412,7 @@ func TestWithFetchCmdOverridesDefault(t *testing.T) {
 
 func TestWithFetchCmdIgnoresNil(t *testing.T) {
 	q, _ := mustOpen(t, WithFetchCmd(nil))
-	want := "agentqueue take --to codex:s --next"
+	want := "agentqueue receive --to codex:s --json"
 	if got := q.FetchCmd(Target{Agent: "codex", Name: "s"}); got != want {
 		t.Fatalf("FetchCmd() = %q, want the default %q", got, want)
 	}
@@ -453,7 +453,7 @@ func TestFetchAndAckCmdIndependent(t *testing.T) {
 		q, _ := mustOpen(t, WithAckCmd(func(target Target, id string) string {
 			return "jill queue ack --to " + target.String() + " " + id
 		}))
-		if got, want := q.FetchCmd(Target{Agent: "codex", Name: "s"}), "agentqueue take --to codex:s --next"; got != want {
+		if got, want := q.FetchCmd(Target{Agent: "codex", Name: "s"}), "agentqueue receive --to codex:s --json"; got != want {
 			t.Fatalf("FetchCmd() = %q, want default %q", got, want)
 		}
 	})

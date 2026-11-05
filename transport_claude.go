@@ -1,22 +1,54 @@
 package agentqueue
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"runtime"
+	"strings"
+	"time"
 
-// claudeTransport serves "claude" targets.
-//
-// Delivery to a Claude Code session happens outside this transport. With
-// `agentqueue install`, hooks claim pending items and inject them at the next
-// session boundary; without hooks, the session itself runs
-// `agentqueue wait --to claude:<name>` as a background command and the harness
-// resumes the turn when that command exits. Neither is a channel a producer can
-// push a notice into, so Notify is a no-op and enqueuing is complete once the
-// item is stored.
+	"github.com/google/uuid"
+)
+
 type claudeTransport struct{}
 
-// Name returns the agent name this transport serves.
-func (c *claudeTransport) Name() string { return "claude" }
-
-// Notify does nothing; delivery happens when the session's Wait returns.
-func (c *claudeTransport) Notify(context.Context, Notice) error { return nil }
-
+func (*claudeTransport) Name() string { return "claude" }
+func (c *claudeTransport) Notify(ctx context.Context, n Notice) error {
+	_, err := c.NotifyWithReceipt(ctx, n)
+	return err
+}
+func (*claudeTransport) NotifyWithReceipt(ctx context.Context, n Notice) (HostReceipt, error) {
+	if runtime.GOOS == "windows" || n.Receiver == nil || n.Receiver.Socket == "" || n.Receiver.Token == "" {
+		return HostReceipt{State: "deferred"}, nil
+	}
+	socket := strings.TrimPrefix(n.Receiver.Socket, "uds:")
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", socket)
+	if err != nil {
+		return HostReceipt{}, fmt.Errorf("Claude receiver connection failed: %w", err)
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
+	}
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return HostReceipt{}, err
+	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	auth, _ := json.Marshal(map[string]string{"type": "auth", "token": n.Receiver.Token})
+	attributes := ""
+	if n.Receiver.PermissionMode == "bypassPermissions" {
+		attributes = ` from-name="agentqueue" from-mode="bypass"`
+	}
+	content := fmt.Sprintf("<cross-session-message from=\"agentqueue\"%s>\n%s\n</cross-session-message>", attributes, noticeMessage(n))
+	frame, _ := json.Marshal(map[string]any{"msgV": 1, "msg_id": uuid.NewString(), "type": "user", "message": map[string]string{"role": "user", "content": content}, "priority": "next", "from": "agentqueue"})
+	if _, err := io.WriteString(conn, string(auth)+"\n"+string(frame)+"\n"); err != nil {
+		return HostReceipt{}, fmt.Errorf("%w: Claude socket write failed", ErrNotificationUncertain)
+	}
+	return HostReceipt{State: "written"}, nil
+}
 func init() { Register(&claudeTransport{}) }

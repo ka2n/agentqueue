@@ -4,52 +4,57 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
-// ErrNotify means the item was persisted but its arrival notice failed.
+// ErrNotify means a persisted message's notification failed.
 var ErrNotify = errors.New("notify failed")
 
-// ErrDeliveryAccepted means the host accepted the body but local archival failed.
-// The item remains claimed; retrying delivery could repeat work in the host.
-var ErrDeliveryAccepted = errors.New("host accepted delivery but archival failed")
+// ErrNotificationUncertain means a notification may have been submitted, but a
+// verifiable host receipt or its durable recording is unavailable.
+var ErrNotificationUncertain = errors.New("notification result uncertain")
 
-// ErrDeliveryInProgress means another receiver owns the item. It may be sending
-// or recovering an uncertain handoff; do not resend or assume host acceptance.
-var ErrDeliveryInProgress = errors.New("delivery in progress or uncertain")
+// ErrDeliveryInProgress means another notifier owns the target reservation.
+var ErrDeliveryInProgress = errors.New("notification in progress")
 
-// Notice carries a queued item's identity and complete payload. Transports that
-// opt in to direct delivery must accept the body before returning success.
+// ErrDeliveryAccepted is retained for callers of the previous body-handoff API.
+// Notifications no longer archive or acknowledge message bodies.
+var ErrDeliveryAccepted = ErrNotificationUncertain
+
 type Notice struct {
-	Target   Target
-	ItemID   string
-	Pending  int
-	FetchCmd string
-	Item     *Item
+	Target      Target
+	ItemID      string
+	Pending     int
+	FetchCmd    string
+	Item        *Item
+	ID          string
+	GeneratedAt time.Time
+	Address     *Address
+	Receiver    *Receiver
 }
 
-// Transport accepts queued-item handoffs for one kind of agent.
+// Transport is the host integration for a target. A no-op keeps existing hook
+// and extension receivers available without claiming an idle wake capability.
 type Transport interface {
-	// Name is the agent name this transport serves, as used in a Target.
 	Name() string
-	// Notify handles the payload. Pull-based transports may no-op until their receiver claims it.
-	Notify(ctx context.Context, n Notice) error
+	Notify(context.Context, Notice) error
 }
 
-// DirectTransport opts in to exclusive full-body handoff. Other transports keep
-// their existing pending-item consumer protocol.
+// ReceiptTransport reports native notification submission independently of
+// payload ownership and application acknowledgement.
+type ReceiptTransport interface {
+	Transport
+	NotifyWithReceipt(context.Context, Notice) (HostReceipt, error)
+}
+
+// DirectTransport is retained for source compatibility; notifications do not
+// hand off or acknowledge the body even when an old adapter implements it.
 type DirectTransport interface {
 	Transport
 	DirectDelivery() bool
-}
-
-func directDelivery(transport Transport) bool {
-	direct, ok := transport.(DirectTransport)
-	return ok && direct.DirectDelivery()
 }
 
 var (
@@ -85,26 +90,21 @@ func Agents() []string {
 	return names
 }
 
-// PushAndNotify persists an item and asks its transport to deliver it. Direct
-// transports own the claim before publication; pull consumers retain pending items.
+// PushAndNotify stores the body before notifying; neither notification nor its
+// receipt changes pending/claimed/done payload state.
 func (q *Queue) PushAndNotify(ctx context.Context, t Target, text string, meta map[string]string) (*Item, error) {
-	transport, ok := Lookup(t.Agent)
-	if !ok {
+	if _, ok := Lookup(t.Agent); !ok {
 		return nil, fmt.Errorf("%w: no transport registered for agent %q; register a transport with agentqueue.Register", ErrInvalidTarget, t.Agent)
 	}
-	state := StatePending
-	if directDelivery(transport) {
-		state = StateClaimed
-	}
-	item, err := q.push(t, text, meta, state)
+	item, err := q.Push(t, text, meta)
 	if err != nil {
 		return nil, err
 	}
-	return item, q.notifyItem(ctx, transport, *item)
+	return item, q.Notify(ctx, t, item.ID)
 }
 
-// Notify retries the same persisted item. A direct transport claims it first;
-// an item already claimed or done belongs to another consumer and is not resent.
+// Notify submits a signal for currently unnotified unread messages. Accepted
+// notification snapshots are durable and separate from body read/ACK state.
 func (q *Queue) Notify(ctx context.Context, t Target, id string) error {
 	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\") {
 		return fmt.Errorf("%w: invalid item id", ErrNotFound)
@@ -113,68 +113,5 @@ func (q *Queue) Notify(ctx context.Context, t Target, id string) error {
 	if !ok {
 		return fmt.Errorf("%w: no transport registered for agent %q", ErrInvalidTarget, t.Agent)
 	}
-	var item *Item
-	var err error
-	if directDelivery(transport) {
-		item, err = q.Take(t, id)
-	} else {
-		dir, e := q.dir(t, StatePending)
-		if e != nil {
-			return e
-		}
-		item, err = readItem(filepath.Join(dir, id+".json"))
-	}
-	if errors.Is(err, ErrNotFound) {
-		for _, state := range []State{StateClaimed, StateDone} {
-			dir, e := q.dir(t, state)
-			if e != nil {
-				return e
-			}
-			if _, e = readItem(filepath.Join(dir, id+".json")); e == nil {
-				if state == StateClaimed {
-					return fmt.Errorf("%w: %s", ErrDeliveryInProgress, id)
-				}
-				return nil
-			} else if !errors.Is(e, ErrNotFound) {
-				return e
-			}
-		}
-	}
-	if err != nil {
-		return err
-	}
-	if item.ID != id || item.Target != t {
-		return fmt.Errorf("%w: persisted item identity mismatch", ErrInvalidTarget)
-	}
-	return q.notifyItem(ctx, transport, *item)
-}
-
-func (q *Queue) notifyItem(ctx context.Context, transport Transport, item Item) error {
-	pending, err := q.List(item.Target, StatePending)
-	if err != nil {
-		return q.notificationFailure(transport, item, err)
-	}
-	notice := Notice{Target: item.Target, ItemID: item.ID, Pending: len(pending), FetchCmd: q.FetchCmd(item.Target), Item: &item}
-	if err := transport.Notify(ctx, notice); err != nil {
-		return q.notificationFailure(transport, item, err)
-	}
-	if directDelivery(transport) {
-		if err := q.Ack(item.Target, item.ID); err != nil {
-			return fmt.Errorf("%w: %s: %w; do not resend", ErrDeliveryAccepted, item.ID, err)
-		}
-	}
-	return nil
-}
-
-func (q *Queue) notificationFailure(transport Transport, item Item, cause error) error {
-	if directDelivery(transport) {
-		base, err := q.targetDir(item.Target)
-		if err == nil {
-			err = os.Rename(filepath.Join(base, StateClaimed.String(), item.ID+".json"), filepath.Join(base, StatePending.String(), item.ID+".json"))
-		}
-		if err != nil {
-			cause = errors.Join(cause, fmt.Errorf("restore pending item: %w", err))
-		}
-	}
-	return fmt.Errorf("%w: %s: %w", ErrNotify, item.Target, cause)
+	return q.notifyPending(ctx, t, id, transport)
 }

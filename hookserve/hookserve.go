@@ -61,6 +61,7 @@ type Payload struct {
 	Cwd            string `json:"cwd"`
 	TranscriptPath string `json:"transcript_path"`
 	Model          string `json:"model"`
+	PermissionMode string `json:"permission_mode"`
 
 	// Source is set on SessionStart: startup, resume, clear, compact or fork.
 	Source string `json:"source"`

@@ -4,358 +4,258 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
-
-	"github.com/google/go-cmp/cmp"
+	"time"
 )
 
-func TestLookupRegisteredTransports(t *testing.T) {
-	for _, agent := range []string{"claude", "codex", "pi"} {
-		tr, ok := Lookup(agent)
-		if !ok {
-			t.Fatalf("Lookup(%q) not registered", agent)
-		}
-		if tr.Name() != agent {
-			t.Fatalf("Lookup(%q).Name() = %q", agent, tr.Name())
-		}
-	}
-	if _, ok := Lookup("nobody"); ok {
-		t.Fatal("Lookup(\"nobody\") = ok, want not registered")
-	}
-}
-
-func TestClaudeTransportNotifyIsNoop(t *testing.T) {
-	tr := &claudeTransport{}
-	notice := Notice{Target: Target{Agent: "claude", Name: "s"}, ItemID: "id", Pending: 1, FetchCmd: "agentqueue take"}
-	if err := tr.Notify(context.Background(), notice); err != nil {
-		t.Fatalf("Notify: %v", err)
-	}
-}
-
-func TestPushAndNotifyPiLeavesItemForExtension(t *testing.T) {
-	q, root := mustOpen(t)
-	target := Target{Agent: "pi", Name: "session-1"}
-	item, err := q.PushAndNotify(context.Background(), target, "body text", nil)
-	if err != nil {
-		t.Fatalf("PushAndNotify: %v", err)
-	}
-	if item == nil {
-		t.Fatal("PushAndNotify returned a nil item")
-	}
-	if _, err := os.Stat(filepath.Join(root, "pi", "session-1", "pending", item.ID+".json")); err != nil {
-		t.Fatalf("item not pending: %v", err)
-	}
-}
-
-func TestCodexTransportNotifyBuildsArgv(t *testing.T) {
-	var gotName string
-	var gotArgs []string
-	tr := &codexTransport{run: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		gotName, gotArgs = name, args
-		return nil, nil
-	}}
-
-	notice := Notice{
-		Target:   Target{Agent: "codex", Name: "01a0-thread"},
-		ItemID:   "1700000000000-abcdef123456",
-		Pending:  3,
-		FetchCmd: "agentqueue take --to codex:01a0-thread --next",
-		Item:     &Item{Text: "first line\nsecond line", Meta: map[string]string{"task_id": "task"}},
-	}
-	if err := tr.Notify(context.Background(), notice); err != nil {
-		t.Fatalf("Notify: %v", err)
-	}
-
-	if gotName != "codex" {
-		t.Fatalf("command = %q, want %q", gotName, "codex")
-	}
-	if len(gotArgs) != 5 {
-		t.Fatalf("args = %v, want 5 elements", gotArgs)
-	}
-	wantPrefix := []string{"queue", "--thread", "01a0-thread", "--message"}
-	if diff := cmp.Diff(wantPrefix, gotArgs[:4]); diff != "" {
-		t.Fatalf("argv prefix mismatch (-want +got):\n%s", diff)
-	}
-
-	msg := gotArgs[4]
-	if strings.Contains(msg, notice.FetchCmd) || strings.Contains(msg, "pending)") {
-		t.Fatalf("obsolete fetch notice: %s", msg)
-	}
-	for _, want := range []string{notice.ItemID, "first line\nsecond line", notice.Target.String(), "task_id"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("message %q does not contain %q", msg, want)
-		}
-	}
-}
-
-func TestCodexTransportNotifyReportsExitError(t *testing.T) {
-	tr := &codexTransport{run: func(context.Context, string, ...string) ([]byte, error) {
-		return []byte("codex: no such thread"), errors.New("exit status 1")
-	}}
-	err := tr.Notify(context.Background(), Notice{Target: Target{Agent: "codex", Name: "s"}, ItemID: "id", Item: &Item{Text: "body"}})
-	if err == nil {
-		t.Fatal("Notify = nil, want error")
-	}
-	if !strings.Contains(err.Error(), "no such thread") {
-		t.Fatalf("error %q does not include the captured output", err)
-	}
-	if !strings.Contains(err.Error(), "exit status 1") {
-		t.Fatalf("error %q does not wrap the exec error", err)
-	}
-}
-
-func TestCodexTransportNotifyTruncatesOutput(t *testing.T) {
-	long := strings.Repeat("x", 2000)
-	tr := &codexTransport{run: func(context.Context, string, ...string) ([]byte, error) {
-		return []byte(long), errors.New("boom")
-	}}
-	err := tr.Notify(context.Background(), Notice{Target: Target{Agent: "codex", Name: "s"}, ItemID: "id", Item: &Item{Text: "body"}})
-	if err == nil {
-		t.Fatal("Notify = nil, want error")
-	}
-	if len(err.Error()) > 800 {
-		t.Fatalf("error message is %d bytes, want the output truncated", len(err.Error()))
-	}
-}
-
-// stubTransport records Notify calls for PushAndNotify tests.
-type stubTransport struct {
-	name    string
-	notices []Notice
-	err     error
-}
-
-func (s *stubTransport) Name() string { return s.name }
-
-func (s *stubTransport) Notify(_ context.Context, n Notice) error {
-	s.notices = append(s.notices, n)
-	return s.err
-}
-
-// registerForTest registers tr and restores the previous registration, if any,
-// when the test ends.
 func registerForTest(t *testing.T, tr Transport) {
 	t.Helper()
-	prev, had := Lookup(tr.Name())
+	old, had := Lookup(tr.Name())
 	Register(tr)
 	t.Cleanup(func() {
 		registryMu.Lock()
+		defer registryMu.Unlock()
 		if had {
-			registry[tr.Name()] = prev
+			registry[tr.Name()] = old
 		} else {
 			delete(registry, tr.Name())
 		}
-		registryMu.Unlock()
 	})
 }
 
-func TestPushAndNotify(t *testing.T) {
-	t.Run("registered custom transport notifies once", func(t *testing.T) {
-		q, root := mustOpen(t)
-		stub := &stubTransport{name: "custom"}
-		registerForTest(t, stub)
-		target := Target{Agent: "custom", Name: "s"}
-
-		item, err := q.PushAndNotify(context.Background(), target, "body text", map[string]string{"k": "v"})
-		if err != nil {
-			t.Fatalf("PushAndNotify: %v", err)
-		}
-		if len(stub.notices) != 1 {
-			t.Fatalf("Notify called %d times, want 1", len(stub.notices))
-		}
-		want := Notice{
-			Target:   target,
-			ItemID:   item.ID,
-			Pending:  1,
-			FetchCmd: fmt.Sprintf("agentqueue take --to %s --next", target),
-			Item:     item,
-		}
-		if diff := cmp.Diff(want, stub.notices[0]); diff != "" {
-			t.Fatalf("notice mismatch (-want +got):\n%s", diff)
-		}
-		if _, err := os.Stat(filepath.Join(root, "custom", "s", "pending", item.ID+".json")); err != nil {
-			t.Fatalf("item not pending: %v", err)
-		}
-	})
-
-	t.Run("notify failure keeps the item", func(t *testing.T) {
-		q, root := mustOpen(t)
-		stub := &stubTransport{name: "stubfail", err: errors.New("transport down")}
-		registerForTest(t, stub)
-		target := Target{Agent: "stubfail", Name: "s"}
-
-		item, err := q.PushAndNotify(context.Background(), target, "body text", nil)
-		if err == nil {
-			t.Fatal("PushAndNotify = nil error, want ErrNotify")
-		}
-		if !errors.Is(err, ErrNotify) {
-			t.Fatalf("error = %v, want ErrNotify", err)
-		}
-		if item == nil {
-			t.Fatal("PushAndNotify returned a nil item; the message would be lost")
-		}
-		if _, err := os.Stat(filepath.Join(root, "stubfail", "s", "pending", item.ID+".json")); err != nil {
-			t.Fatalf("item not left pending: %v", err)
-		}
-	})
-
-	t.Run("unknown agent", func(t *testing.T) {
-		q, _ := mustOpen(t)
-		item, err := q.PushAndNotify(context.Background(), Target{Agent: "ghost", Name: "s"}, "x", nil)
-		if err == nil {
-			t.Fatal("PushAndNotify = nil error, want unknown agent error")
-		}
-		if item != nil {
-			t.Fatalf("item = %+v, want nil for an unknown agent", item)
-		}
-		if !strings.Contains(err.Error(), "ghost") {
-			t.Fatalf("error %q does not name the unknown agent", err)
-		}
-		if !strings.Contains(err.Error(), "no transport registered") {
-			t.Fatalf("error %q does not describe the missing transport", err)
-		}
-		if !strings.Contains(err.Error(), "agentqueue.Register") {
-			t.Fatalf("error %q does not name the registration extension point", err)
-		}
-	})
+type receiptStub struct {
+	calls atomic.Int32
+	send  func(context.Context, Notice) (HostReceipt, error)
 }
 
-func TestPushAndNotifyUsesConfiguredFetchCmd(t *testing.T) {
-	stub := &stubTransport{name: "custom-fetch"}
-	registerForTest(t, stub)
-	q, _ := mustOpen(t, WithFetchCmd(func(target Target) string { return "myctl fetch " + target.String() }))
-	target := Target{Agent: "custom-fetch", Name: "s"}
-	if _, err := q.PushAndNotify(context.Background(), target, "body", nil); err != nil {
-		t.Fatal(err)
+func (*receiptStub) Name() string { return "test-receipts" }
+func (s *receiptStub) Notify(ctx context.Context, n Notice) error {
+	_, err := s.NotifyWithReceipt(ctx, n)
+	return err
+}
+func (s *receiptStub) NotifyWithReceipt(ctx context.Context, n Notice) (HostReceipt, error) {
+	s.calls.Add(1)
+	if s.send != nil {
+		return s.send(ctx, n)
 	}
-	if len(stub.notices) != 1 || stub.notices[0].FetchCmd != "myctl fetch custom-fetch:s" {
-		t.Fatalf("configured fetch lost: %+v", stub.notices)
+	return HostReceipt{State: "queued", QueueID: "host-id"}, nil
+}
+
+func TestLookupRegisteredTransports(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "pi"} {
+		if _, ok := Lookup(name); !ok {
+			t.Fatalf("missing %s", name)
+		}
 	}
 }
-
-func TestDirectDeliveryClaimsBeforeHandoffAndArchives(t *testing.T) {
+func TestNotificationReceiptDoesNotConsumeBody(t *testing.T) {
 	q, _ := mustOpen(t)
-	target := Target{Agent: "codex", Name: "thread"}
-	var delivered string
-	registerForTest(t, &codexTransport{run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if _, err := q.TakeNext(target); !errors.Is(err, ErrEmpty) {
-			t.Errorf("competing consumer obtained body: %v", err)
-		}
-		delivered = args[len(args)-1]
-		return nil, nil
-	}})
-	item, err := q.PushAndNotify(context.Background(), target, "complete\nbody", map[string]string{"task_id": "task"})
+	transport := &receiptStub{}
+	registerForTest(t, transport)
+	target := Target{Agent: transport.Name(), Name: "session"}
+	first, err := q.PushAndNotify(context.Background(), target, "first", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(delivered, "complete\nbody") || !strings.Contains(delivered, item.ID) || strings.Contains(delivered, "Fetch it with:") {
-		t.Fatalf("wrong payload: %s", delivered)
+	for range 3 {
+		if err := q.Notify(context.Background(), target, first.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
-	done, err := q.List(target, StateDone)
-	if err != nil || len(done) != 1 || done[0].ID != item.ID {
-		t.Fatalf("delivery not archived: %+v %v", done, err)
+	if transport.calls.Load() != 1 {
+		t.Fatal("same unread item repeatedly notified")
 	}
-	if _, err := q.TakeNext(target); !errors.Is(err, ErrEmpty) {
-		t.Fatalf("success still pending: %v", err)
+	state, err := q.Notification(target)
+	if err != nil || state.State != "queued" || len(state.NotifiedIDs) != 1 {
+		t.Fatalf("bad receipt: %+v %v", state, err)
+	}
+	second, err := q.PushAndNotify(context.Background(), target, "second", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport.calls.Load() != 2 {
+		t.Fatal("new unread item was suppressed")
+	}
+	received, err := q.Receive(target, 20)
+	if err != nil || len(received) != 2 {
+		t.Fatalf("not consumed atomically: %+v %v", received, err)
+	}
+	empty, err := q.Receive(target, 20)
+	if err != nil || len(empty) != 0 {
+		t.Fatal("stale notice must be a successful empty receive")
+	}
+	for _, item := range received {
+		if err := q.Ack(target, item.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if err := q.Notify(context.Background(), target, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if transport.calls.Load() != 2 {
+		t.Fatal("acknowledged body was notified again")
 	}
 }
-
-func TestDirectDeliveryFailureRetriesSameBodyAndID(t *testing.T) {
+func TestFailedNotificationRetriesSamePersistedBody(t *testing.T) {
 	q, _ := mustOpen(t)
-	target := Target{Agent: "codex", Name: "thread"}
-	calls := 0
-	registerForTest(t, &codexTransport{run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		calls++
-		if !strings.Contains(args[len(args)-1], "body") {
-			t.Fatal("missing body")
+	transport := &receiptStub{}
+	registerForTest(t, transport)
+	transport.send = func(context.Context, Notice) (HostReceipt, error) {
+		if transport.calls.Load() == 1 {
+			return HostReceipt{}, errors.New("unavailable")
 		}
-		if calls == 1 {
-			return nil, errors.New("host unavailable")
-		}
-		return nil, nil
-	}})
+		return HostReceipt{State: "queued", QueueID: "receipt"}, nil
+	}
+	target := Target{Agent: transport.Name(), Name: "s"}
 	item, err := q.PushAndNotify(context.Background(), target, "body", nil)
 	if !errors.Is(err, ErrNotify) {
 		t.Fatalf("got %v", err)
 	}
-	pending, err := q.List(target, StatePending)
-	if err != nil || len(pending) != 1 || pending[0].ID != item.ID {
-		t.Fatalf("failed body not recoverable: %+v %v", pending, err)
-	}
 	if err := q.Notify(context.Background(), target, item.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Notify(context.Background(), target, item.ID); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 2 {
-		t.Fatalf("redelivered accepted body: %d calls", calls)
+	received, err := q.Receive(target, 1)
+	if err != nil || len(received) != 1 || received[0].ID != item.ID {
+		t.Fatalf("lost body/identity: %+v %v", received, err)
 	}
 }
-
-func TestConcurrentDirectRetryHasOneOwner(t *testing.T) {
+func TestConcurrentNotificationWritersAndSnapshot(t *testing.T) {
 	q, _ := mustOpen(t)
-	target := Target{Agent: "codex", Name: "thread"}
+	transport := &receiptStub{}
+	registerForTest(t, transport)
+	target := Target{Agent: transport.Name(), Name: "s"}
 	item, err := q.Push(target, "body", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	registerForTest(t, &codexTransport{run: func(context.Context, string, ...string) ([]byte, error) {
-		calls.Add(1)
+	transport.send = func(ctx context.Context, _ Notice) (HostReceipt, error) {
 		close(entered)
-		<-release
-		return nil, nil
-	}})
-	finished := make(chan error, 1)
-	go func() { finished <- q.Notify(context.Background(), target, item.ID) }()
-	<-entered
-	if err := q.Notify(context.Background(), target, item.ID); !errors.Is(err, ErrDeliveryInProgress) {
-		t.Errorf("claimed item falsely reported acceptance: %v", err)
+		select {
+		case <-release:
+			return HostReceipt{State: "queued"}, nil
+		case <-ctx.Done():
+			return HostReceipt{}, ctx.Err()
+		}
 	}
-	if _, err := q.TakeNext(target); !errors.Is(err, ErrEmpty) {
-		t.Errorf("pull consumer won during handoff: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- q.Notify(context.Background(), target, item.ID) }()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := q.Notify(ctx, target, item.ID); err == nil {
+		t.Fatal("competing notification bypassed ownership")
+	}
+	// Consumers own bodies independently of the notifier.
+	if received, err := q.Receive(target, 1); err != nil || len(received) != 1 {
+		t.Fatal("notifier locked the body")
 	}
 	close(release)
-	if err := <-finished; err != nil {
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("host received %d copies", calls.Load())
+	if transport.calls.Load() != 1 {
+		t.Fatal("duplicate host submission")
+	}
+}
+func TestUncertainReservationExpiresWithoutAcknowledgingBody(t *testing.T) {
+	now := time.Now().UTC()
+	q, root := mustOpen(t, WithClock(func() time.Time { return now }))
+	transport := &receiptStub{}
+	registerForTest(t, transport)
+	target := Target{Agent: transport.Name(), Name: "s"}
+	item, err := q.Push(target, "body", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := q.targetDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateJSON(base, "notification.json", NotificationStatus{State: "submitting", GeneratedAt: now, AttemptIDs: []string{item.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Notify(context.Background(), target, item.ID); !errors.Is(err, ErrDeliveryInProgress) {
+		t.Fatalf("uncertain reservation ignored: %v (%s)", err, root)
+	}
+	now = now.Add(uncertainLifetime + time.Second)
+	if err := q.Notify(context.Background(), target, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if received, err := q.Receive(target, 1); err != nil || len(received) != 1 {
+		t.Fatal("reservation changed read state")
+	}
+}
+func TestUncertainHostResultIsNotImmediatelyResent(t *testing.T) {
+	q, _ := mustOpen(t)
+	transport := &receiptStub{send: func(context.Context, Notice) (HostReceipt, error) { return HostReceipt{}, ErrNotificationUncertain }}
+	registerForTest(t, transport)
+	target := Target{Agent: transport.Name(), Name: "s"}
+	item, err := q.PushAndNotify(context.Background(), target, "body", nil)
+	if !errors.Is(err, ErrNotificationUncertain) {
+		t.Fatal(err)
+	}
+	if err := q.Notify(context.Background(), target, item.ID); !errors.Is(err, ErrDeliveryInProgress) {
+		t.Fatal(err)
+	}
+	if transport.calls.Load() != 1 {
+		t.Fatal("immediate replay of uncertain signal")
+	}
+}
+func TestPullIntegrationsKeepBodyPending(t *testing.T) {
+	for _, name := range []string{"claude", "pi"} {
+		t.Run(name, func(t *testing.T) {
+			q, _ := mustOpen(t)
+			item, err := q.PushAndNotify(context.Background(), Target{Agent: name, Name: "s"}, "body", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending, err := q.List(item.Target, StatePending)
+			if err != nil || len(pending) != 1 {
+				t.Fatal("no-op changed payload ownership")
+			}
+		})
+	}
+}
+func TestUnknownAgentDoesNotPublish(t *testing.T) {
+	q, _ := mustOpen(t)
+	item, err := q.PushAndNotify(context.Background(), Target{Agent: "missing", Name: "s"}, "body", nil)
+	if item != nil || err == nil || !strings.Contains(err.Error(), "agentqueue.Register") {
+		t.Fatalf("%+v %v", item, err)
 	}
 }
 
-func TestAcceptedDeliveryArchiveFailureDoesNotRequeue(t *testing.T) {
-	q, root := mustOpen(t)
-	target := Target{Agent: "codex", Name: "thread"}
-	calls := 0
-	registerForTest(t, &codexTransport{run: func(context.Context, string, ...string) ([]byte, error) {
-		calls++
-		claimed, err := q.List(target, StateClaimed)
-		if err != nil || len(claimed) != 1 {
-			t.Fatalf("claim missing: %+v %v", claimed, err)
+const testThread = "01a1a947-2087-78b3-bafc-0a245b11cd3e"
+const testQueueID = "738e06d2-1bab-4e10-9ad0-7fe29c5a2c69"
+
+func codexNotice(t *testing.T) Notice {
+	t.Helper()
+	return Notice{Target: Target{Agent: "codex", Name: testThread}, ID: "notice-id", FetchCmd: "myctl receive", GeneratedAt: time.Now(), Address: &Address{Profile: t.TempDir()}, Item: &Item{Text: "do not put this body in a signal"}}
+}
+func TestCodexReceiptAndTargetProfile(t *testing.T) {
+	n := codexNotice(t)
+	tr := &codexTransport{runProfile: func(_ context.Context, profile, name string, args ...string) ([]byte, error) {
+		if profile != n.Address.Profile || name != "codex" || args[0] != "queue" || args[2] != testThread {
+			t.Fatalf("wrong destination: %s %s %v", profile, name, args)
 		}
-		if err := os.Mkdir(filepath.Join(root, "codex", "thread", "done", claimed[0].ID+".json"), 0700); err != nil {
-			t.Fatal(err)
+		message := args[len(args)-1]
+		if !strings.Contains(message, n.FetchCmd) || strings.Contains(message, n.Item.Text) || strings.Contains(message, "pending") {
+			t.Fatalf("wrong nudge: %s", message)
 		}
-		return nil, nil
-	}})
-	item, err := q.PushAndNotify(context.Background(), target, "body", nil)
-	if !errors.Is(err, ErrDeliveryAccepted) || errors.Is(err, ErrNotify) {
-		t.Fatalf("acceptance lost: %v", err)
+		return []byte(fmt.Sprintf("Queued message %s for thread %s.\n", testQueueID, testThread)), nil
+	}}
+	receipt, err := tr.NotifyWithReceipt(context.Background(), n)
+	if err != nil || receipt.QueueID != testQueueID || receipt.State != "queued" {
+		t.Fatalf("%+v %v", receipt, err)
 	}
-	if _, err := q.TakeNext(target); !errors.Is(err, ErrEmpty) {
-		t.Fatal("accepted body returned to pending")
-	}
-	if err := q.Notify(context.Background(), target, item.ID); !errors.Is(err, ErrDeliveryInProgress) {
-		t.Fatalf("uncertain handoff falsely reported accepted: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("accepted body sent %d times", calls)
+	for _, output := range []string{"success", fmt.Sprintf("Queued message %s for thread %s.\n", testQueueID, testQueueID)} {
+		tr.runProfile = func(context.Context, string, string, ...string) ([]byte, error) { return []byte(output), nil }
+		if _, err := tr.NotifyWithReceipt(context.Background(), n); !errors.Is(err, ErrNotificationUncertain) {
+			t.Fatalf("false receipt: %v", err)
+		}
 	}
 }
