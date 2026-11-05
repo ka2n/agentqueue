@@ -34,6 +34,8 @@ test('Pi lifecycle refreshes context and unregisters without depending on metada
   vm.runInContext(`${code}\nthis.install = install`, sandbox);
   sandbox.install(pi);
   await handlers.session_start({}, ctx);
+  assert.equal(sandbox.process.env.CROSSAGENT_AGENT, "pi");
+  assert.equal(sandbox.process.env.CROSSAGENT_SESSION_ID, "session-123");
   assert.deepEqual(Array.from(calls[0].args), ['register', '--agent', 'pi', '--to', 'pi:session-123', '--quiet']);
   assert.equal(calls[0].payload.cwd, ctx.cwd);
   assert.equal(calls[0].payload.session_id, 'session-123');
@@ -50,4 +52,9 @@ test('Pi lifecycle refreshes context and unregisters without depending on metada
   failSpawn = false;
   await handlers.session_shutdown();
   assert.equal(calls.at(-1).args[0], 'unregister');
+  assert.equal(sandbox.process.env.CROSSAGENT_SESSION_ID, undefined);
+  await handlers.session_start({}, ctx);
+  await handlers.session_start({}, {...ctx, sessionManager: {getSessionId: () => ""}});
+  assert.equal(sandbox.process.env.CROSSAGENT_AGENT, undefined);
+  assert.equal(sandbox.process.env.CROSSAGENT_SESSION_ID, undefined);
 });

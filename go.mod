@@ -4,4 +4,4 @@ go 1.25.8
 
 require github.com/google/go-cmp v0.7.0
 
-require github.com/ka2n/crossagent v0.0.0-20261016030458-b4170e6bbb7a
+require github.com/ka2n/crossagent v0.0.0-20261105015238-639ecbff0094
