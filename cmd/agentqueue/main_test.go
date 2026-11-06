@@ -454,7 +454,7 @@ func TestCLINotificationLeavesBodyForReceiveAndAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := agentqueue.Target{Agent: "codex", Name: "01a1a947-2087-78b3-bafc-0a245b11cd3e"}
-	if err := q.PutAddress(agentqueue.Address{Agent: target.Agent, Name: target.Name, Profile: t.TempDir()}); err != nil {
+	if err := q.PutAddress(agentqueue.Address{Agent: target.Agent, Name: target.Name, Profile: t.TempDir(), WakeProtocol: agentqueue.WakeProtocolVersion}); err != nil {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
@@ -467,10 +467,17 @@ func TestCLINotificationLeavesBodyForReceiveAndAck(t *testing.T) {
 	if err != nil || strings.Contains(string(payload), body) || !strings.Contains(string(payload), "receive --root") {
 		t.Fatalf("notice = %s, %v", payload, err)
 	}
+	state, err := q.Notification(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "--notice "+state.ID) {
+		t.Fatalf("notice-specific command missing: %s", payload)
+	}
 	for _, want := range []int{1, 0} {
 		out.Reset()
 		errOut.Reset()
-		if code := run(context.Background(), []string{"receive", "--root", root, "--to", target.String(), "--json"}, strings.NewReader(""), &out, &errOut); code != exitOK {
+		if code := run(context.Background(), []string{"receive", "--root", root, "--to", target.String(), "--notice", state.ID, "--json"}, strings.NewReader(""), &out, &errOut); code != exitOK {
 			t.Fatalf("receive: %s", errOut.String())
 		}
 		var items []agentqueue.Item
