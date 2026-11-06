@@ -1,6 +1,7 @@
 package hookserve
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -105,5 +106,49 @@ func TestCodexConcurrentHooksClaimOnce(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("delivered %d times", n)
+	}
+}
+
+type queuedHookWake struct{ calls int }
+
+func (*queuedHookWake) Name() string { return "codex" }
+func (t *queuedHookWake) Notify(ctx context.Context, n agentqueue.Notice) error {
+	_, err := t.NotifyWithReceipt(ctx, n)
+	return err
+}
+func (t *queuedHookWake) NotifyWithReceipt(context.Context, agentqueue.Notice) (agentqueue.HostReceipt, error) {
+	t.calls++
+	return agentqueue.HostReceipt{State: "queued", QueueID: "fixture"}, nil
+}
+func TestCodexHooksDeliverBodiesWithoutAcknowledgingQueuedWake(t *testing.T) {
+	q := openQueue(t)
+	target := agentqueue.Target{Agent: "codex", Name: "thread"}
+	old, _ := agentqueue.Lookup("codex")
+	transport := &queuedHookWake{}
+	agentqueue.Register(transport)
+	t.Cleanup(func() { agentqueue.Register(old) })
+	if err := RegisterAddress(q, target, Payload{SessionID: target.Name}, noEnv); err != nil {
+		t.Fatal(err)
+	}
+	address, err := q.Address(target)
+	if err != nil || address.WakeProtocol != agentqueue.WakeProtocolVersion {
+		t.Fatalf("receiver did not advertise drain protocol: %+v %v", address, err)
+	}
+	for range 4 {
+		item, err := q.PushAndNotify(context.Background(), target, "body", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, delivered, err := HandleCodex(q, Payload{SessionID: target.Name, HookEventName: "PostToolUse"}, Options{Getenv: noEnv})
+		if err != nil || !delivered || !strings.Contains(output.HookSpecificOutput.AdditionalContext, item.ID) {
+			t.Fatalf("body not delivered: %+v %v", output, err)
+		}
+		if err := q.Ack(target, item.ID); err != nil {
+			t.Fatal(err)
+		}
+		status, err := q.Notification(target)
+		if err != nil || status.State != "queued" || transport.calls != 1 {
+			t.Fatalf("hook cleared unseen wake: %+v %v calls=%d", status, err, transport.calls)
+		}
 	}
 }

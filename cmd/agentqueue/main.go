@@ -441,7 +441,12 @@ func cmdWait(ctx context.Context, args []string, stdout, stderr io.Writer) (int,
 	if *timeout > 0 {
 		wait = time.Duration(*timeout) * time.Second
 	}
-	items, err := q.Wait(ctx, target, wait)
+	var items []agentqueue.Item
+	if *take {
+		items, err = q.WaitReceive(ctx, target, wait, 1)
+	} else {
+		items, err = q.Wait(ctx, target, wait)
+	}
 	if err != nil {
 		if errors.Is(err, agentqueue.ErrTimeout) {
 			// A clean timeout gets its own exit code, not the generic failure.
@@ -452,15 +457,7 @@ func cmdWait(ctx context.Context, args []string, stdout, stderr io.Writer) (int,
 	}
 
 	if *take {
-		item, err := q.TakeNext(target)
-		if err != nil {
-			if errors.Is(err, agentqueue.ErrEmpty) {
-				// Another consumer claimed it between Wait and TakeNext.
-				return exitError, errors.New("a message arrived but another consumer claimed it first")
-			}
-			return exitError, err
-		}
-		return exitOK, printItem(stdout, item, *asJSON)
+		return exitOK, printItem(stdout, &items[0], *asJSON)
 	}
 
 	if *asJSON {
