@@ -2,6 +2,7 @@ package agentqueue
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -28,14 +29,15 @@ type HostReceipt struct {
 }
 
 type NotificationStatus struct {
-	Coalescing  bool        `json:"coalescing,omitempty"`
-	ID          string      `json:"id"`
-	State       string      `json:"state"`
-	GeneratedAt time.Time   `json:"generated_at"`
-	NotifiedIDs []string    `json:"notified_ids"`
-	AttemptIDs  []string    `json:"attempt_ids,omitempty"`
-	DrainUntil  time.Time   `json:"drain_until,omitempty"`
-	Receipt     HostReceipt `json:"receipt"`
+	WakeProtocol int         `json:"wake_protocol,omitempty"`
+	Coalescing   bool        `json:"coalescing,omitempty"`
+	ID           string      `json:"id"`
+	State        string      `json:"state"`
+	GeneratedAt  time.Time   `json:"generated_at"`
+	NotifiedIDs  []string    `json:"notified_ids"`
+	AttemptIDs   []string    `json:"attempt_ids,omitempty"`
+	DrainUntil   time.Time   `json:"drain_until,omitempty"`
+	Receipt      HostReceipt `json:"receipt"`
 }
 
 // Notification reads only transport state; it does not read or consume bodies.
@@ -100,7 +102,7 @@ func (q *Queue) lockNotification(ctx context.Context, t Target) (string, func(),
 }
 
 func (s NotificationStatus) flightActive(now time.Time) bool {
-	return s.Coalescing && (s.State == "queued" || s.State == "receiving" && now.Before(s.DrainUntil))
+	return s.Coalescing && s.WakeProtocol == WakeProtocolVersion && (s.State == "queued" || s.State == "receiving" && now.Before(s.DrainUntil))
 }
 
 func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transport Transport) error {
@@ -174,6 +176,23 @@ func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transpor
 		}
 		return nil
 	}
+	if compatible {
+		if state.WakeProtocol == WakeProtocolVersion && state.ID != "" && (state.State == "failed" || state.State == "uncertain" || state.State == "submitting") {
+			notice.ID = state.ID
+		} else {
+			var identity [16]byte
+			if _, err := rand.Read(identity[:]); err != nil {
+				return err
+			}
+			notice.ID = hex.EncodeToString(identity[:])
+		}
+		notice.FetchCmd += " --notice " + notice.ID
+		state.WakeProtocol = WakeProtocolVersion
+	} else {
+		state.WakeProtocol = 0
+	}
+	state.Coalescing = false
+	state.Receipt = HostReceipt{}
 	state.ID, state.State, state.GeneratedAt, state.AttemptIDs = notice.ID, "submitting", now, ids
 	if err := writePrivateJSON(base, "notification.json", state); err != nil {
 		return err

@@ -17,8 +17,8 @@ import (
 // addrFileName holds a session's address inside its target directory.
 const addrFileName = "addr.json"
 
-// WakeProtocolVersion identifies receivers that observe and finish queued wake drains.
-const WakeProtocolVersion = 1
+// WakeProtocolVersion identifies receivers that observe identity-bound wake drains.
+const WakeProtocolVersion = 2
 
 // byCwdDirName is the per-agent index from working directory to session name.
 // It lives beside the session directories, so a session literally named

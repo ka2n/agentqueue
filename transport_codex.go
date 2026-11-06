@@ -72,7 +72,7 @@ func (c *codexTransport) NotifyWithReceipt(ctx context.Context, n Notice) (HostR
 	return HostReceipt{State: "queued", QueueID: matches[1], ThreadID: matches[2]}, nil
 }
 func noticeMessage(n Notice) string {
-	return fmt.Sprintf("[agentqueue notice %s; generated %s] Your inbox changed. Receive unread messages with: %s. Receive batches until empty, handling and ACKing each item before continuing. This is a signal, not a new request; an empty inbox means it was already consumed. Do not retry an empty receive.", n.ID, n.GeneratedAt.UTC().Format(time.RFC3339Nano), n.FetchCmd)
+	return fmt.Sprintf("[agentqueue notice %s; generated %s] Your inbox changed. Run this receive command unchanged for each batch:\n%s\nHandle and ACK each item, then repeat the same command until empty. Preserve --notice when present: it acknowledges only this notification, even if bodies were delivered earlier. This is a signal, not a new request. An empty result needs no retry.", n.ID, n.GeneratedAt.UTC().Format(time.RFC3339Nano), n.FetchCmd)
 }
 func execRun(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()

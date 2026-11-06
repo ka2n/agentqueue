@@ -619,6 +619,7 @@ func cmdReceive(args []string, stdout io.Writer) error {
 	to := fs.String("to", "", "target session")
 	root := fs.String("root", "", "queue root")
 	limit := fs.Int("limit", 20, "maximum messages (1..100)")
+	notice := fs.String("notice", "", "observe only this notification ID")
 	asJSON := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -634,7 +635,13 @@ func cmdReceive(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	items, receiveErr := q.Receive(target, *limit)
+	var items []agentqueue.Item
+	var receiveErr error
+	if *notice != "" {
+		items, receiveErr = q.ReceiveNotice(target, *notice, *limit)
+	} else {
+		items, receiveErr = q.Receive(target, *limit)
+	}
 	if *asJSON {
 		if err := printJSON(stdout, items); err != nil {
 			return err

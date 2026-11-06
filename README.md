@@ -295,7 +295,9 @@ native messaging socket; the token lives only in a private mode-600 file.
 A successful socket write is recorded as `written`, not receiver acceptance.
 Without native routing, existing hooks/extensions deliver pending bodies.
 
-On a hint, use `agentqueue receive --to TARGET --json`. It atomically claims up
+On a hint, use the supplied `agentqueue receive --to TARGET --notice ID --json`
+command unchanged for every batch. Ordinary `receive` does not acknowledge an
+unseen wake. The notice-specific receive atomically claims up
 to 20 pending items (configurable through `--limit`, at most 100). Handle each
 body and `ack` its ID, then receive again until `[]`. Empty is successful: a
 hook or another receiver may already have consumed the hinted items. If an
@@ -305,19 +307,22 @@ fallback when automatic receiving is unavailable.
 
 Notification receipts are stored independently of body pending/claimed/done
 state. Repeating `Queue.Notify` for an already notified ID does not send another
-hint merely because the body is unread. Wake coalescing is enabled only for receivers registered with
+hint merely because the body is unread. Identity-bound wake coalescing requires protocol version 2, enabled for receivers registered with
 `Address.WakeProtocol = agentqueue.WakeProtocolVersion`; the updated hooks and
 register command advertise this automatically. Older or unknown receivers retain
-per-new-message notification behavior, so an old receive command cannot leave
-new wakes permanently suppressed. Upgrade both producers and receivers.
+per-new-message notification behavior. Old ledger flights cannot enable
+version-2 coalescing. Stale notice IDs return empty without consuming another
+flight's bodies; generic empty reads leave unseen wakes untouched. Upgrade both producers and receivers.
 
 While a verified queued hint is outstanding, new IDs join that same flight
 instead of queuing more hints. Hooks and `wait --take` share its OS lock, but
 can still deliver bodies before the host delivers that hint. Automatic body
 consumption does not release the outstanding wake: otherwise every subsequent
 message would queue another stale hint. If an automatic receiver claims first,
-no native hint is submitted for its body. An empty explicit receive ends the
+no native hint is submitted for its body. An empty receive with the matching `--notice ID` ends the
 flight; a receiving flight has a five-minute renewable drain lease for recovery.
+New flights get fresh notice IDs, while unobserved ambiguous retries retain the
+persisted ID so a possibly queued notice can still recover its bodies.
 Written-only socket receipts retain existing hook fallback.
 
 An already accepted host hint cannot be retracted, so one stale empty receive
@@ -339,7 +344,7 @@ syntax and examples without consulting this document.
 | `push --to <agent>:<name> [--root DIR] [--meta KEY=VALUE]... [TEXT\|-]` | Enqueue a message and notify the target when supported. `-` or no text reads the body from stdin; repeated `--meta` flags attach metadata. Exit 0 when queued, 1 on an error (including notification failure; the item remains queued), 2 for invalid usage. |
 | `wait --to <agent>:<name> [--root DIR] [--timeout SECONDS] [--take] [--json]` | Wait for a pending message. `--take` claims and prints the oldest one; without it, all pending bodies are reported without claiming. `--timeout` defaults to 3600 seconds and `0` waits forever. Exit 3 when the timeout expires. |
 | `list --to <agent>:<name> [--root DIR] [--state pending\|claimed\|done] [--json]` | List one mailbox state, defaulting to `pending`, without changing messages. |
-| `receive --to <agent>:<name> [--limit N] [--json]` | Claim a batch of unread bodies. Empty is a successful `[]`; handle and ACK each ID, then drain until empty. |
+| `receive --to <agent>:<name> [--notice ID] [--limit N] [--json]` | Claim a batch of unread bodies. Empty is a successful `[]`; handle and ACK each ID, then drain until empty. |
 | `take --to <agent>:<name> [--root DIR] [--json] (--next \| ID)` | Claim exactly one pending message, either the oldest with `--next` or the given ID, and print it. |
 | `ack --to <agent>:<name> [--root DIR] ID` | Mark one pending or claimed message done after acting on it. |
 | `targets [--agent AGENT] [--root DIR] [--json]` | List mailboxes and their pending, claimed and done counts, recorded cwd and address status. A mailbox is storage metadata, not proof of a running session. |
@@ -545,5 +550,6 @@ The inbox notification state-machine property test runs its fixed corpus with
 `go test ./...`. For generated operation sequences, run
 `go test -run '^$' -fuzz FuzzInboxFlightStateMachine -fuzztime=30s`.
 It checks body conservation/content, unique acquisition and notification counts
-across push, notify, automatic/explicit receive, ACK and time advancement.
+across push, notify, automatic/generic/current-notice/stale-notice receive, ACK
+and time advancement.
 Concurrent lock interleavings are covered separately by race-enabled tests.
