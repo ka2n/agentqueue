@@ -305,7 +305,24 @@ fallback when automatic receiving is unavailable.
 
 Notification receipts are stored independently of body pending/claimed/done
 state. Repeating `Queue.Notify` for an already notified ID does not send another
-hint merely because the body is unread. New IDs trigger a new inbox snapshot.
+hint merely because the body is unread. Wake coalescing is enabled only for receivers registered with
+`Address.WakeProtocol = agentqueue.WakeProtocolVersion`; the updated hooks and
+register command advertise this automatically. Older or unknown receivers retain
+per-new-message notification behavior, so an old receive command cannot leave
+new wakes permanently suppressed. Upgrade both producers and receivers.
+
+While a verified queued hint is outstanding, new IDs join that same flight
+instead of queuing more hints. Hooks and `wait --take` share its OS lock, but
+can still deliver bodies before the host delivers that hint. Automatic body
+consumption does not release the outstanding wake: otherwise every subsequent
+message would queue another stale hint. If an automatic receiver claims first,
+no native hint is submitted for its body. An empty explicit receive ends the
+flight; a receiving flight has a five-minute renewable drain lease for recovery.
+Written-only socket receipts retain existing hook fallback.
+
+An already accepted host hint cannot be retracted, so one stale empty receive
+can remain. The change prevents a burst of redundant wakes without delaying
+body delivery. Explicit take/receive remains available for manual recovery.
 An OS lock serializes native submissions; a persisted reservation bounds crash
 or ambiguous acceptance retries to a 30-second uncertainty interval. Retried
 signals can duplicate, but atomic claims prevent duplicate body acquisition.
@@ -523,3 +540,10 @@ Custom host launchers should export `CROSSAGENT_AGENT`, `CROSSAGENT_SESSION_ID`
 and `AGENTQUEUE_ROOT` for their own session. Conflicting inherited native identity
 must be removed by the launcher or callers must supply an explicit target.
 A resolved endpoint does not guarantee an active consumer or host wake-up.
+
+The inbox notification state-machine property test runs its fixed corpus with
+`go test ./...`. For generated operation sequences, run
+`go test -run '^$' -fuzz FuzzInboxFlightStateMachine -fuzztime=30s`.
+It checks body conservation/content, unique acquisition and notification counts
+across push, notify, automatic/explicit receive, ACK and time advancement.
+Concurrent lock interleavings are covered separately by race-enabled tests.

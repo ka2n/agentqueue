@@ -391,33 +391,44 @@ func (q *Queue) Ack(t Target, id string) error {
 // without claiming them. A timeout of zero or less means wait indefinitely.
 // It returns ErrTimeout on deadline and ctx.Err() when ctx ends first.
 func (q *Queue) Wait(ctx context.Context, t Target, timeout time.Duration) ([]Item, error) {
+	return q.wait(ctx, t, timeout, func(_ context.Context, t Target) ([]Item, error) { return q.List(t, StatePending) })
+}
+
+func (q *Queue) wait(ctx context.Context, t Target, timeout time.Duration, scan func(context.Context, Target) ([]Item, error)) ([]Item, error) {
 	if _, err := q.targetDir(t); err != nil {
 		return nil, err
 	}
-
-	var deadline <-chan time.Time
+	parent := ctx
 	if timeout > 0 {
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		deadline = timer.C
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-
+	mapError := func(err error) error {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
+		if timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return ErrTimeout
+		}
+		return err
+	}
 	ticker := time.NewTicker(q.poll())
 	defer ticker.Stop()
-
 	for {
-		items, err := q.List(t, StatePending)
+		if err := ctx.Err(); err != nil {
+			return nil, mapError(err)
+		}
+		items, err := scan(ctx, t)
 		if err != nil {
-			return nil, err
+			return items, mapError(err)
 		}
 		if len(items) > 0 {
 			return items, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-deadline:
-			return nil, ErrTimeout
+			return nil, mapError(ctx.Err())
 		case <-ticker.C:
 		}
 	}

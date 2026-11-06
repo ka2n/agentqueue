@@ -16,6 +16,7 @@ import (
 
 const notificationTimeout = 10 * time.Second
 const uncertainLifetime = 30 * time.Second
+const drainLifetime = 5 * time.Minute
 
 // HostReceipt is a submission receipt, never a body read or processing receipt.
 // queued has a verifiable host queue ID; written is a socket write only;
@@ -27,11 +28,13 @@ type HostReceipt struct {
 }
 
 type NotificationStatus struct {
+	Coalescing  bool        `json:"coalescing,omitempty"`
 	ID          string      `json:"id"`
 	State       string      `json:"state"`
 	GeneratedAt time.Time   `json:"generated_at"`
 	NotifiedIDs []string    `json:"notified_ids"`
 	AttemptIDs  []string    `json:"attempt_ids,omitempty"`
+	DrainUntil  time.Time   `json:"drain_until,omitempty"`
 	Receipt     HostReceipt `json:"receipt"`
 }
 
@@ -79,20 +82,33 @@ func writePrivateJSON(base, name string, value any) error {
 	return os.Rename(file.Name(), filepath.Join(base, name))
 }
 
-func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transport Transport) error {
+func (q *Queue) lockNotification(ctx context.Context, t Target) (string, func(), error) {
 	base, err := q.ensureDirs(t)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	lock := flock.New(filepath.Join(base, "notification.lock"))
 	locked, err := lock.TryLockContext(ctx, 10*time.Millisecond)
+	if err != nil || !locked {
+		lock.Close()
+		if err == nil {
+			err = ErrDeliveryInProgress
+		}
+		return "", nil, err
+	}
+	return base, func() { lock.Close() }, nil
+}
+
+func (s NotificationStatus) flightActive(now time.Time) bool {
+	return s.Coalescing && (s.State == "queued" || s.State == "receiving" && now.Before(s.DrainUntil))
+}
+
+func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transport Transport) error {
+	base, unlock, err := q.lockNotification(ctx, t)
 	if err != nil {
 		return err
 	}
-	if !locked {
-		return ErrDeliveryInProgress
-	}
-	defer lock.Close()
+	defer unlock()
 	state, err := q.Notification(t)
 	if err != nil {
 		return err
@@ -122,25 +138,30 @@ func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transpor
 		}
 		return ErrNotFound
 	}
-	known := make(map[string]bool, len(state.NotifiedIDs))
-	for _, notified := range state.NotifiedIDs {
-		known[notified] = true
+	address, addressErr := q.Address(t)
+	if addressErr != nil && !errors.Is(addressErr, ErrNotFound) {
+		return addressErr
 	}
-	if known[id] {
-		return nil
-	}
+	compatible := address != nil && address.WakeProtocol == WakeProtocolVersion
 	now := q.now().UTC()
+	if compatible && state.flightActive(now) {
+		state.NotifiedIDs = ids
+		return writePrivateJSON(base, "notification.json", state)
+	}
+	if state.State == "written" || state.State == "queued" && !state.Coalescing {
+		for _, known := range state.NotifiedIDs {
+			if known == id {
+				return nil
+			}
+		}
+	}
 	if (state.State == "submitting" || state.State == "uncertain") && now.Before(state.GeneratedAt.Add(uncertainLifetime)) {
 		return ErrDeliveryInProgress
 	}
 	encoded, _ := json.Marshal(ids)
 	sum := sha256.Sum256(append([]byte(t.String()+"\n"), encoded...))
 	notice := Notice{Target: t, ItemID: id, Pending: len(pending), FetchCmd: q.FetchCmd(t), Item: requested, ID: hex.EncodeToString(sum[:16]), GeneratedAt: now}
-	if address, e := q.Address(t); e == nil {
-		notice.Address = address
-	} else if !errors.Is(e, ErrNotFound) {
-		return e
-	}
+	notice.Address = address
 	if receiver, e := q.Receiver(t); e == nil {
 		notice.Receiver = receiver
 	} else if !errors.Is(e, ErrNotFound) {
@@ -174,6 +195,7 @@ func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transpor
 		return fmt.Errorf("%w: invalid host receipt", ErrNotificationUncertain)
 	}
 	state.State, state.Receipt = receipt.State, receipt
+	state.Coalescing = compatible && receipt.State == "queued"
 	if receipt.State != "deferred" {
 		state.NotifiedIDs = ids
 	}

@@ -17,6 +17,9 @@ import (
 // addrFileName holds a session's address inside its target directory.
 const addrFileName = "addr.json"
 
+// WakeProtocolVersion identifies receivers that observe and finish queued wake drains.
+const WakeProtocolVersion = 1
+
 // byCwdDirName is the per-agent index from working directory to session name.
 // It lives beside the session directories, so a session literally named
 // "_by_cwd" would collide with it; the leading underscore makes that unlikely,
@@ -33,6 +36,7 @@ const maxCwdSegment = 80
 // Private receiver credentials live in a separate mode-0600 file and are never
 // included in public address/session output.
 type Address struct {
+	WakeProtocol int                      `json:"wake_protocol,omitempty"`
 	Context      *sessioncontext.Snapshot `json:"context,omitempty"`
 	Agent        string                   `json:"agent"`
 	Name         string                   `json:"name"`

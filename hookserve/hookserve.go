@@ -14,6 +14,7 @@
 package hookserve
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -244,22 +245,13 @@ func ClaimUpTo(q *agentqueue.Queue, t agentqueue.Target, max int) ([]agentqueue.
 	if max <= 0 {
 		max = DefaultMax
 	}
-	var items []agentqueue.Item
-	for len(items) < max {
-		item, err := q.TakeNext(t)
-		if errors.Is(err, agentqueue.ErrEmpty) {
-			break
-		}
-		if err != nil {
-			if len(items) > 0 {
-				// Deliver what was already claimed rather than dropping it.
-				break
-			}
-			return nil, err
-		}
-		items = append(items, *item)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	items, err := q.ReceiveAutomatic(ctx, t, max)
+	if len(items) > 0 {
+		return items, nil
 	}
-	return items, nil
+	return items, err
 }
 
 // RenderDelivery formats claimed items as the additionalContext string.

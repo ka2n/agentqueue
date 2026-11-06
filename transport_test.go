@@ -55,6 +55,9 @@ func TestNotificationReceiptDoesNotConsumeBody(t *testing.T) {
 	transport := &receiptStub{}
 	registerForTest(t, transport)
 	target := Target{Agent: transport.Name(), Name: "session"}
+	if err := q.PutAddress(Address{Agent: target.Agent, Name: target.Name, WakeProtocol: WakeProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
 	first, err := q.PushAndNotify(context.Background(), target, "first", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -75,8 +78,8 @@ func TestNotificationReceiptDoesNotConsumeBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if transport.calls.Load() != 2 {
-		t.Fatal("new unread item was suppressed")
+	if transport.calls.Load() != 1 {
+		t.Fatal("additional message queued another wake instead of coalescing")
 	}
 	received, err := q.Receive(target, 20)
 	if err != nil || len(received) != 2 {
@@ -96,7 +99,7 @@ func TestNotificationReceiptDoesNotConsumeBody(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if transport.calls.Load() != 2 {
+	if transport.calls.Load() != 1 {
 		t.Fatal("acknowledged body was notified again")
 	}
 }
@@ -150,9 +153,10 @@ func TestConcurrentNotificationWritersAndSnapshot(t *testing.T) {
 	if err := q.Notify(ctx, target, item.ID); err == nil {
 		t.Fatal("competing notification bypassed ownership")
 	}
-	// Consumers own bodies independently of the notifier.
-	if received, err := q.Receive(target, 1); err != nil || len(received) != 1 {
-		t.Fatal("notifier locked the body")
+	ctxReceive, cancelReceive := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelReceive()
+	if _, err := q.ReceiveAutomatic(ctxReceive, target, 1); err == nil {
+		t.Fatal("automatic consumer bypassed notification ownership")
 	}
 	close(release)
 	if err := <-done; err != nil {

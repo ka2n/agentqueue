@@ -36,6 +36,7 @@ func AddressFor(t agentqueue.Target, payload Payload, getenv func(string) string
 	}
 	snapshot := sessioncontext.Collect(context.Background(), cwd, sessioncontext.Options{Getenv: getenv, Agent: name, SessionID: t.Name})
 	address := agentqueue.Address{
+		WakeProtocol: agentqueue.WakeProtocolVersion,
 		Context:      &snapshot,
 		Agent:        t.Agent,
 		Name:         t.Name,
