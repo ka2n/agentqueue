@@ -2,6 +2,7 @@ package agentqueue
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -176,11 +177,21 @@ func (q *Queue) notifyPending(ctx context.Context, t Target, id string, transpor
 		return nil
 	}
 	if compatible {
+		if state.WakeProtocol == WakeProtocolVersion && state.ID != "" && (state.State == "failed" || state.State == "uncertain" || state.State == "submitting") {
+			notice.ID = state.ID
+		} else {
+			var identity [16]byte
+			if _, err := rand.Read(identity[:]); err != nil {
+				return err
+			}
+			notice.ID = hex.EncodeToString(identity[:])
+		}
 		notice.FetchCmd += " --notice " + notice.ID
 		state.WakeProtocol = WakeProtocolVersion
 	} else {
 		state.WakeProtocol = 0
 	}
+	state.Coalescing = false
 	state.Receipt = HostReceipt{}
 	state.ID, state.State, state.GeneratedAt, state.AttemptIDs = notice.ID, "submitting", now, ids
 	if err := writePrivateJSON(base, "notification.json", state); err != nil {

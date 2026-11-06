@@ -321,6 +321,8 @@ consumption does not release the outstanding wake: otherwise every subsequent
 message would queue another stale hint. If an automatic receiver claims first,
 no native hint is submitted for its body. An empty receive with the matching `--notice ID` ends the
 flight; a receiving flight has a five-minute renewable drain lease for recovery.
+New flights get fresh notice IDs, while unobserved ambiguous retries retain the
+persisted ID so a possibly queued notice can still recover its bodies.
 Written-only socket receipts retain existing hook fallback.
 
 An already accepted host hint cannot be retracted, so one stale empty receive
@@ -548,5 +550,6 @@ The inbox notification state-machine property test runs its fixed corpus with
 `go test ./...`. For generated operation sequences, run
 `go test -run '^$' -fuzz FuzzInboxFlightStateMachine -fuzztime=30s`.
 It checks body conservation/content, unique acquisition and notification counts
-across push, notify, automatic/explicit receive, ACK and time advancement.
+across push, notify, automatic/generic/current-notice/stale-notice receive, ACK
+and time advancement.
 Concurrent lock interleavings are covered separately by race-enabled tests.

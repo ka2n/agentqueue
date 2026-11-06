@@ -375,3 +375,73 @@ func TestNoticeObservedAfterUncertainSubmission(t *testing.T) {
 		t.Fatalf("notice was not observed: %+v", after)
 	}
 }
+
+func TestExpiredObservedFlightGetsNewIdentityForSamePendingBody(t *testing.T) {
+	now := time.Now().UTC()
+	q, _ := mustOpen(t, WithClock(func() time.Time { return now }))
+	tr := &receiptStub{}
+	registerForTest(t, tr)
+	target := Target{Agent: tr.Name(), Name: "restart"}
+	ctx := context.Background()
+	if err := q.PutAddress(Address{Agent: target.Agent, Name: target.Name, WakeProtocol: WakeProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := q.PushAndNotify(ctx, target, "body", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, _ := q.Notification(target)
+	previous.State = "receiving"
+	previous.DrainUntil = now.Add(drainLifetime)
+	base, _ := q.targetDir(target)
+	if err := writePrivateJSON(base, "notification.json", previous); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(drainLifetime + time.Second)
+	if err := q.Notify(ctx, target, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := q.Notification(target)
+	if current.ID == previous.ID {
+		t.Fatal("new flight reused an already observed identity")
+	}
+	if batch, err := q.ReceiveNotice(target, previous.ID, 20); err != nil || len(batch) != 0 {
+		t.Fatalf("old identity acknowledged retried flight: %+v %v", batch, err)
+	}
+	batch, err := q.ReceiveNotice(target, current.ID, 20)
+	if err != nil || len(batch) != 1 {
+		t.Fatalf("current flight lost body: %+v %v", batch, err)
+	}
+}
+
+func TestUnobservedUncertainRetryRetainsIdentityAcrossNewArrivals(t *testing.T) {
+	now := time.Now().UTC()
+	q, _ := mustOpen(t, WithClock(func() time.Time { return now }))
+	tr := &receiptStub{send: func(context.Context, Notice) (HostReceipt, error) { return HostReceipt{}, ErrNotificationUncertain }}
+	registerForTest(t, tr)
+	target := Target{Agent: tr.Name(), Name: "unknown"}
+	ctx := context.Background()
+	if err := q.PutAddress(Address{Agent: target.Agent, Name: target.Name, WakeProtocol: WakeProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.PushAndNotify(ctx, target, "first", nil); !errors.Is(err, ErrNotificationUncertain) {
+		t.Fatal(err)
+	}
+	previous, _ := q.Notification(target)
+	now = now.Add(uncertainLifetime + time.Second)
+	second, err := q.Push(target, "second", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Notify(ctx, target, second.ID); !errors.Is(err, ErrNotificationUncertain) {
+		t.Fatal(err)
+	}
+	current, _ := q.Notification(target)
+	if current.ID != previous.ID {
+		t.Fatal("uncertain retry orphaned a possibly queued notice")
+	}
+	batch, err := q.ReceiveNotice(target, previous.ID, 20)
+	if err != nil || len(batch) != 2 {
+		t.Fatalf("observed uncertain notice could not recover pending bodies: %+v %v", batch, err)
+	}
+}
